@@ -23,8 +23,8 @@ type County struct {
 	TaxApiUrl sql.NullString `gorm:"type:text"`
 
 	// Geometry fields. PostGIS handles the spatial type
-	Boundary           string `gorm:"type:geometry(Polygon, 4326);not null"`
-	BoundarySimplified string `gorm:"type:geometry(Polygon, 4326)"`
+	Boundary           string `gorm:"type:geometry(MultiPolygon, 4326);not null"`
+	BoundarySimplified string `gorm:"type:geometry(MultiPolygon, 4326)"`
 	Centroid           string `gorm:"type:geometry(Point, 4326)"`
 	BBox               string `gorm:"type:geometry(Polygon, 4326)"`
 

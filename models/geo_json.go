@@ -30,3 +30,17 @@ type CountyFeatureProperties struct {
 	Acres    float64 `json:"Acres"`      // Acres
 	SqMiles  float64 `json:"Sq_Miles"`   // Square Miles
 }
+
+// ParcelFeatureCollection matches the top-level GeoJSON response for parcels
+// Uses dynamic Properties map to handle varying field names across counties
+type ParcelFeatureCollection struct {
+	Type     string          `json:"type"`
+	Features []ParcelFeature `json:"features"`
+}
+
+// ParcelFeature matches individual parcel feature with dynamic properties
+type ParcelFeature struct {
+	Type       string                 `json:"type"`
+	Geometry   Geometry               `json:"geometry"`
+	Properties map[string]interface{} `json:"properties"`
+}

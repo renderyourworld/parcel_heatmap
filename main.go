@@ -1,23 +1,53 @@
 package main
 
 import (
+	"flag"
 	"log"
+	"os"
 
 	"github.com/gin-contrib/cors"
+	"github.com/gin-contrib/gzip"
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
 	"github.com/renderyourworld/parcel_heatmap/db"
 	"github.com/renderyourworld/parcel_heatmap/handlers"
-	// Uncomment the next line to run the initial county import from SAGIS API
-	// "github.com/renderyourworld/parcel_heatmap/importers"
+	"github.com/renderyourworld/parcel_heatmap/importers"
 )
 
 func main() {
+	// Parse command-line flags
+	importParcels := flag.Bool("import-parcels", false, "Run parcel importer for specified county")
+	county := flag.String("county", "", "County name to import parcels for")
+	resume := flag.Bool("resume", false, "Resume import from last checkpoint")
+	maxParcels := flag.Int("max-parcels", 0, "Maximum number of parcels to import (0 = no limit, for testing)")
+	flag.Parse()
+
 	// Load environment variables from .env file (if it exists)
 	_ = godotenv.Load()
 
 	// Initialize the database connection
 	db.Connect()
+
+	// Check if we should run the importer instead of starting the server
+	if *importParcels {
+		if *county == "" {
+			log.Fatal("Error: --county flag is required when using --import-parcels")
+		}
+
+		if *maxParcels > 0 {
+			log.Printf("Starting parcel import for %s county (resume=%v, max=%d)", *county, *resume, *maxParcels)
+		} else {
+			log.Printf("Starting parcel import for %s county (resume=%v)", *county, *resume)
+		}
+
+		if err := importers.StartParcelImporter(db.DB, *county, *resume, *maxParcels); err != nil {
+			log.Printf("ERROR: Parcel import failed: %v", err)
+			os.Exit(1)
+		}
+
+		log.Println("Parcel import completed successfully!")
+		os.Exit(0)
+	}
 
 	// Optional: Start the Georgia County importer to populate county boundaries
 	// Uncomment the lines below to import all 159 counties from SAGIS API (~2-3 minutes)
@@ -36,14 +66,17 @@ func main() {
 	// Enable CORS for all origins (adjust as needed for production)
 	router.Use(cors.Default())
 
-	// Register route for getting visible parcels
+	// Enable GZIP compression for responses
+	router.Use(gzip.Gzip(gzip.DefaultCompression))
+
+	// Register API routes
 	api := router.Group("/api")
 	{
 		// County boundary endpoint with zoom-aware detail switching
 		api.GET("/counties", handlers.GetCountyBoundaries)
 
-		// Parcel endpoint for bbox-based queries
-		api.GET("/parcels", handlers.GetVisibleParcels)
+		// Parcel endpoint for bbox-based queries with precomputed GeoJSON
+		api.GET("/parcels", handlers.GetParcels)
 	}
 
 	// Health check endpoint

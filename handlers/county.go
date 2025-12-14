@@ -33,15 +33,14 @@ func GetCountyBoundaries(c *gin.Context) {
 	`
 
 	// If detail is 'full', check cache first before querying DB.
-	// Cache stores all 159 counties' full boundaries (regardless of bbox requested).
+	// Cache stores all 159 counties' full boundaries (GZIP middleware handles compression)
 	if detail == "full" {
 		cacheKey := "all_counties|full"
 
-		// Try to get from cache
-		if gzipData, found := countyCache.Get(cacheKey); found {
+		// Try to get from cache (store uncompressed, let middleware compress)
+		if jsonData, found := countyCache.Get(cacheKey); found {
 			log.Printf("[Cache HIT] Serving all full county boundaries from cache")
-			c.Header("Content-Encoding", "gzip")
-			c.Data(http.StatusOK, "application/vnd.geo+json", gzipData)
+			c.Data(http.StatusOK, "application/vnd.geo+json", jsonData)
 			return
 		}
 
@@ -66,19 +65,12 @@ func GetCountyBoundaries(c *gin.Context) {
 		return
 	}
 
-	// If this is a full-detail request, gzip and cache the response before returning.
+	// If this is a full-detail request, cache the uncompressed JSON
+	// GZIP middleware will handle compression automatically
 	if detail == "full" {
-		gzipData, gzErr := GzipBytes([]byte(geoJSONString))
-		if gzErr != nil {
-			log.Printf("Warning: Failed to gzip response for caching: %v", gzErr)
-		} else {
-			cacheKey := "all_counties|full"
-			countyCache.Set(cacheKey, gzipData)
-			log.Printf("[Cache STORE] Cached all full county boundaries (%d bytes gzipped)", len(gzipData))
-			c.Header("Content-Encoding", "gzip")
-			c.Data(http.StatusOK, "application/vnd.geo+json", gzipData)
-			return
-		}
+		cacheKey := "all_counties|full"
+		countyCache.Set(cacheKey, []byte(geoJSONString))
+		log.Printf("[Cache STORE] Cached all full county boundaries (%d bytes uncompressed)", len(geoJSONString))
 	}
 
 	c.Data(http.StatusOK, "application/vnd.geo+json", []byte(geoJSONString))
