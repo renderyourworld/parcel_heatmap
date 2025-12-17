@@ -25,9 +25,7 @@ type Parcel struct {
 	TaxDistrict    sql.NullString  `gorm:"type:varchar(10)"`
 
 	// Geometry
-	Geometry        string `gorm:"type:geometry(MultiPolygon, 4326)"`
-	Centroid        string `gorm:"column:centroid;type:geometry(Point, 4326)"`
-	BoundaryGeoJSON string `gorm:"column:boundary_geojson;type:jsonb"`
+	Geometry string `gorm:"type:geometry(MultiPolygon, 4326)"`
 
 	// Import Tracking
 	LastSync     sql.NullTime   `gorm:"type:timestamp"`

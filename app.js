@@ -1,451 +1,360 @@
-// Global variable for the map instance
-let map = null;
+// MapLibre Vector Tiles
+const GEORGIA_CENTER = [-83.6, 32.8]; // [lng, lat]
+const INITIAL_ZOOM = 7;
 
-// Global variables for managing layers
-let simplifiedCountyLayer = null;
-let fullCountyLayer = null;
-let labelLayerGroup = null; // Separate layer for county labels (render once)
-let parcelLayer = null; // Layer for parcel boundaries (zoom 16+)
-let parcelLabelLayerGroup = null; // Separate layer for parcel site number labels (zoom 17+)
-let simplifiedGeoJSON = null; // Cache for simplified boundaries
-let fullGeoJSON = null; // Cache for full boundaries (preloaded in background)
-let selectedParcel = null; // Track currently selected parcel for highlight
-
-// Parcel caching - track loaded tiles using grid system
-let loadedTiles = new Set(); // Tracks tile keys like "123_456"
-let parcelFetchInProgress = false;
-const TILE_GRID_SIZE = 0.01; // ~1.1km at Georgia's latitude
-
-// Constants
-const GEORGIA_CENTER = [32.8, -83.6];
-const INITIAL_ZOOM = 8;
-const DETAIL_ZOOM_THRESHOLD = 11; // Switch to full boundary detail at zoom 11+
-const PARCEL_ZOOM_THRESHOLD = 16; // Start loading parcels at zoom 16+
-const PARCEL_LABEL_ZOOM_THRESHOLD = 17; // Show parcel site number labels at zoom 17+
-const API_BASE = 'http://localhost:9000/api/counties';
-const PARCEL_API_BASE = 'http://localhost:9000/api/parcels';
-
-// Debounce utility: delays invoking func until after wait milliseconds
-// have elapsed since the last time the debounced function was invoked.
-function debounce(func, wait) {
-    let timeout;
-    return function(...args) {
-        const context = this;
-        clearTimeout(timeout);
-        timeout = setTimeout(() => func.apply(context, args), wait);
-    };
-}
-
-// Handler for zoom/move events
-function onMapZoomOrMove() {
-    const currentZoom = map.getZoom();
-
-    // If zoomed to parcel level, load and render parcels
-    if (currentZoom >= PARCEL_ZOOM_THRESHOLD) {
-        // Hide both county layers at parcel zoom level
-        if (simplifiedCountyLayer && map.hasLayer(simplifiedCountyLayer)) {
-            map.removeLayer(simplifiedCountyLayer);
-        }
-        if (fullCountyLayer && map.hasLayer(fullCountyLayer)) {
-            map.removeLayer(fullCountyLayer);
-        }
-        
-        // Show/hide labels based on zoom level
-        if (currentZoom >= PARCEL_LABEL_ZOOM_THRESHOLD) {
-            // At zoom 17+, show labels if they exist
-            if (parcelLabelLayerGroup && !map.hasLayer(parcelLabelLayerGroup)) {
-                parcelLabelLayerGroup.addTo(map);
-            }
-        } else {
-            // Below zoom 17, hide labels
-            if (parcelLabelLayerGroup && map.hasLayer(parcelLabelLayerGroup)) {
-                map.removeLayer(parcelLabelLayerGroup);
-            }
-        }
-        
-        // Load parcels for current viewport
-        fetchAndRenderParcels();
-        return;
-    }
-
-    // Clear parcel layer, labels, and cache when zooming out below threshold
-    if (parcelLayer && map.hasLayer(parcelLayer)) {
-        map.removeLayer(parcelLayer);
-        parcelLayer.clearLayers();
-        parcelLayer = null;
-    }
-    if (parcelLabelLayerGroup && map.hasLayer(parcelLabelLayerGroup)) {
-        map.removeLayer(parcelLabelLayerGroup);
-        parcelLabelLayerGroup.clearLayers();
-        parcelLabelLayerGroup = null;
-    }
-    // Clear tile cache when zooming out
-    loadedTiles.clear();
-
-    // If below detail threshold, restore cached simplified boundaries
-    if (currentZoom < DETAIL_ZOOM_THRESHOLD) {
-        // Always re-render simplified when zooming back out
-        renderSimplifiedBoundaries(simplifiedGeoJSON);
-        return;
-    }
-
-    // At zoom 11+: render full boundaries from cache
-    renderFullBoundaries(fullGeoJSON);
-}
-
- // Initialize the map and set up event handlers.
-function initMap() {
-    // Create map instance
-    map = L.map('map').setView(GEORGIA_CENTER, INITIAL_ZOOM);
-
-    // Add base tile layer
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-        maxZoom: 19,
-        attribution: '© OpenStreetMap contributors'
-    }).addTo(map);
-
-    // Create label layer groups (separate from boundaries)
-    labelLayerGroup = L.layerGroup().addTo(map);
-    parcelLabelLayerGroup = L.layerGroup(); // Don't add to map yet - only at parcel zoom
-
-    // Add zoom level indicator for debugging
-    const zoomIndicator = L.control({ position: 'bottomright' });
-    zoomIndicator.onAdd = function() {
-        const div = L.DomUtil.create('div', 'zoom-indicator');
-        div.style.background = 'rgba(255, 255, 255, 0.9)';
-        div.style.padding = '8px 12px';
-        div.style.border = '2px solid #333';
-        div.style.borderRadius = '4px';
-        div.style.fontWeight = 'bold';
-        div.style.fontSize = '14px';
-        div.innerHTML = 'Zoom: ' + map.getZoom();
-        return div;
-    };
-    zoomIndicator.addTo(map);
-
-    // Update zoom indicator on zoom
-    map.on('zoomend', function() {
-        document.querySelector('.zoom-indicator').innerHTML = 'Zoom: ' + map.getZoom();
-    });
-
-    // Load simplified boundaries on initial page load (no re-fetch on pan/zoom at zoom < 11)
-    map.whenReady(function() {
-        loadAndRenderSimplifiedBoundaries();
-        
-        // Preload full boundaries in the background (do not await; let it load asynchronously)
-        // This way, by the time the user zooms to full-detail level, the data is already cached
-        preloadFullBoundaries();
-    });
-
-    // Debounced handler for detailed boundaries (zoom 11+)
-    const debouncedZoomHandler = debounce(onMapZoomOrMove, 300);
-    map.on('zoomend', debouncedZoomHandler);
-    map.on('moveend', debouncedZoomHandler);
-}
-
-// Load and render simplified county boundaries (all counties, cached).
-function loadAndRenderSimplifiedBoundaries() {
-    fetch(`${API_BASE}?detail=simplified`)
-        .then(response => {
-            if (!response.ok) {
-                throw new Error('Failed to fetch simplified boundaries');
-            }
-            return response.json();
-        })
-        .then(data => {
-            simplifiedGeoJSON = data; // Cache for reuse
-            renderSimplifiedBoundaries(data);
-            renderLabels(data); // Render labels once
-        })
-        .catch(error => {
-            console.error('Error loading simplified county boundaries:', error);
-        });
-}
-
-// Render simplified county boundaries (low zoom levels 8-10).
-function renderSimplifiedBoundaries(geoJsonData) {
-    // Create the layer once if it doesn't exist
-    if (!simplifiedCountyLayer) {
-        simplifiedCountyLayer = L.geoJSON(geoJsonData, {
-            style: {
-                color: '#007BFF',
-                weight: 1,
-                fillColor: '#88C0D0',
-                fillOpacity: 0.5
+// Initialize the map
+const map = new maplibregl.Map({
+    container: 'map',
+    maxZoom: 19,
+    style: {
+        version: 8,
+        glyphs: 'https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf',
+        sources: {
+            'osm': {
+                type: 'raster',
+                tiles: ['https://a.tile.openstreetmap.org/{z}/{x}/{y}.png'],
+                tileSize: 256,
+                attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
             },
-            onEachFeature: function(feature, layer) {
-                const props = feature.properties;
-                layer.bindPopup(buildCountyPopupHTML(props));
+            'parcels': {
+                type: 'vector',
+                tiles: ['http://localhost:9000/api/tiles/{z}/{x}/{y}'],
+                minzoom: 13,
+                maxzoom: 19,
+                promoteId: 'parcel_id'
             }
-        });
-    }
-
-    // Show simplified layer, hide full layer
-    if (!map.hasLayer(simplifiedCountyLayer)) {
-        simplifiedCountyLayer.addTo(map);
-    }
-    if (fullCountyLayer && map.hasLayer(fullCountyLayer)) {
-        map.removeLayer(fullCountyLayer);
-    }
-}
-
-// Render county name labels once (based on simplified boundary centroids).
-function renderLabels(geoJsonData) {
-    // Clear old labels if any
-    labelLayerGroup.clearLayers();
-
-    geoJsonData.features.forEach(feature => {
-        const props = feature.properties;
-        const name = props.name || 'Unknown';
-
-        // Use the centroid from the database properties
-        if (props.centroid && props.centroid.coordinates) {
-            const coords = props.centroid.coordinates;
-            const latlng = L.latLng(coords[1], coords[0]); // GeoJSON is [lon, lat]
-
-            // Create a label marker
-            L.marker(latlng, {
-                icon: L.divIcon({
-                    className: 'county-label',
-                    html: `<span style="font-size: 12px; font-weight: bold; color: #333; white-space: nowrap;">${name}</span>`,
-                    iconSize: null // No fixed size; auto-size to content
-                })
-            }).addTo(labelLayerGroup);
-        }
-    });
-}
-
-// Preload full county boundaries in the background (without rendering).
-// This ensures the full boundaries are cached before the user zooms in to view them.
-function preloadFullBoundaries() {
-    console.log('Preloading full county boundaries in background...');
-    fetch(`${API_BASE}?detail=full`)
-        .then(response => {
-            if (!response.ok) {
-                throw new Error('Failed to preload full boundaries');
-            }
-            return response.json();
-        })
-        .then(data => {
-            fullGeoJSON = data; // Cache for reuse
-            console.log('Full county boundaries preloaded and cached (' + JSON.stringify(data).length + ' bytes)');
-        })
-        .catch(error => {
-            console.error('Error preloading full county boundaries:', error);
-        });
-}
-
-// Render full county boundaries (high zoom levels 11-12).
-function renderFullBoundaries(geoJsonData) {
-    // Create the layer once if it doesn't exist
-    if (!fullCountyLayer) {
-        fullCountyLayer = L.geoJSON(geoJsonData, {
-            style: {
-                color: '#007BFF',
-                weight: 2,
-                fillColor: '#88C0D0',
-                fillOpacity: 0.2
+        },
+        layers: [
+            {
+                id: 'osm-tiles',
+                type: 'raster',
+                source: 'osm',
+                minzoom: 0,
+                maxzoom: 22
             },
-            onEachFeature: function(feature, layer) {
-                const props = feature.properties;
-                layer.bindPopup(buildCountyPopupHTML(props));
+            {
+                id: 'parcel-fill',
+                type: 'fill',
+                source: 'parcels',
+                'source-layer': 'parcels',
+                minzoom: 13,
+                paint: {
+                    'fill-color': [
+                        'case',
+                        ['boolean', ['feature-state', 'selected'], false],
+                        '#ff6b6b',
+                        '#3388ff'
+                    ],
+                    'fill-opacity': [
+                        'case',
+                        ['boolean', ['feature-state', 'selected'], false],
+                        0.6,
+                        0.2
+                    ]
+                }
+            },
+            {
+                id: 'parcel-outline',
+                type: 'line',
+                source: 'parcels',
+                'source-layer': 'parcels',
+                minzoom: 13,
+                paint: {
+                    'line-color': [
+                        'case',
+                        ['boolean', ['feature-state', 'selected'], false],
+                        '#ff0000',
+                        '#3388ff'
+                    ],
+                    'line-width': [
+                        'case',
+                        ['boolean', ['feature-state', 'selected'], false],
+                        3,
+                        1
+                    ]
+                }
+            },
+            {
+                id: 'parcel-labels',
+                type: 'symbol',
+                source: 'parcels',
+                'source-layer': 'parcels',
+                minzoom: 15,
+                layout: {
+                    'text-field': ['get', 'site_number'],
+                    'text-size': 10,
+                    'text-font': ['Noto Sans Regular'],
+                    'text-anchor': 'center',
+                    'symbol-avoid-edges': true,
+                    'symbol-z-order': 'auto',
+                    'symbol-placement': 'point',
+                    'text-allow-overlap': false,
+                    'text-ignore-placement': false,
+                    'text-optional': true
+                },
+                paint: {
+                    'text-color': '#333333',
+                    'text-halo-color': '#ffffff',
+                    'text-halo-width': 1.5
+                }
             }
-        });
+        ]
+    },
+    center: GEORGIA_CENTER,
+    zoom: INITIAL_ZOOM
+});
+
+// Add navigation controls
+map.addControl(new maplibregl.NavigationControl(), 'top-right');
+
+// Track selected parcel
+let selectedParcelId = null;
+
+// Click handler for parcels
+map.on('click', 'parcel-fill', (e) => {
+    if (e.features.length === 0) return;
+
+    const feature = e.features[0];
+    
+    // Clear previous selection
+    if (selectedParcelId !== null) {
+        map.setFeatureState(
+            { source: 'parcels', sourceLayer: 'parcels', id: selectedParcelId },
+            { selected: false }
+        );
     }
 
-    // Show full layer, hide simplified layer
-    if (!map.hasLayer(fullCountyLayer)) {
-        fullCountyLayer.addTo(map);
-    }
-    if (simplifiedCountyLayer && map.hasLayer(simplifiedCountyLayer)) {
-        map.removeLayer(simplifiedCountyLayer);
-    }
-}
+    // Set new selection
+    selectedParcelId = feature.properties.parcel_id;
+    map.setFeatureState(
+        { source: 'parcels', sourceLayer: 'parcels', id: selectedParcelId },
+        { selected: true }
+    );
 
-// Build rich HTML popup content from county properties.
-function buildCountyPopupHTML(props) {
-    const format = (val) => val ?? 'N/A';
-    return `
-        <div style="font-family: Arial, sans-serif; font-size: 12px; max-width: 200px;">
-            <h4 style="margin: 0 0 8px 0; font-size: 14px;">${props.name} County, ${props.state || 'GA'}</h4>
-            <hr style="margin: 4px 0;">
-            <p style="margin: 4px 0;"><b>Population:</b> ${format(props.population)}</p>
-            <p style="margin: 4px 0;"><b>Region:</b> ${format(props.region)}</p>
-            <p style="margin: 4px 0;"><b>Acres:</b> ${format(props.acres)}</p>
-            <p style="margin: 4px 0;"><b>Sq. Miles:</b> ${format(props.square_miles)}</p>
+    // Create popup content
+    const props = feature.properties;
+    const popupHTML = `
+        <div style="font-family: sans-serif; max-width: 300px;">
+            <h3 style="margin: 0 0 10px 0; font-size: 14px; border-bottom: 2px solid #3388ff; padding-bottom: 5px;">
+                Parcel ${props.site_number || 'N/A'}
+            </h3>
+            <table style="width: 100%; font-size: 12px;">
+                <tr><td style="padding: 3px 5px 3px 0; font-weight: bold;">Parcel ID:</td><td style="padding: 3px 0;">${props.parcel_id || 'N/A'}</td></tr>
+                <tr><td style="padding: 3px 5px 3px 0; font-weight: bold;">Address:</td><td style="padding: 3px 0;">${props.site_address || 'N/A'}</td></tr>
+                <tr><td style="padding: 3px 5px 3px 0; font-weight: bold;">Owner:</td><td style="padding: 3px 0;">${props.owner_name || 'N/A'}</td></tr>
+                <tr><td style="padding: 3px 5px 3px 0; font-weight: bold;">Owner Address:</td><td style="padding: 3px 0;">${props.owner_address || 'N/A'}</td></tr>
+                <tr><td style="padding: 3px 5px 3px 0; font-weight: bold;">Acres:</td><td style="padding: 3px 0;">${props.acres || 'N/A'}</td></tr>
+                <tr><td style="padding: 3px 5px 3px 0; font-weight: bold;">Classification:</td><td style="padding: 3px 0;">${props.classification || 'N/A'}</td></tr>
+                <tr><td style="padding: 3px 5px 3px 0; font-weight: bold;">Tax District:</td><td style="padding: 3px 0;">${props.tax_district || 'N/A'}</td></tr>
+            </table>
         </div>
     `;
+
+    // Show popup
+    new maplibregl.Popup()
+        .setLngLat(e.lngLat)
+        .setHTML(popupHTML)
+        .addTo(map);
+});
+
+// Helper function to format numbers with commas
+function formatNumber(num) {
+    if (num === null || num === undefined || num === '') return 'N/A';
+    return Number(num).toLocaleString('en-US');
 }
 
-// Calculate which grid tiles the viewport covers
-function getBboxTiles(bounds) {
-    const minTileX = Math.floor(bounds.getWest() / TILE_GRID_SIZE);
-    const maxTileX = Math.floor(bounds.getEast() / TILE_GRID_SIZE);
-    const minTileY = Math.floor(bounds.getSouth() / TILE_GRID_SIZE);
-    const maxTileY = Math.floor(bounds.getNorth() / TILE_GRID_SIZE);
-    
-    const tiles = [];
-    for (let x = minTileX; x <= maxTileX; x++) {
-        for (let y = minTileY; y <= maxTileY; y++) {
-            tiles.push({ x, y, key: `${x}_${y}` });
-        }
+// County click handlers
+map.on('click', 'county-fill-simplified', (e) => {
+    if (e.features.length === 0) return;
+    const props = e.features[0].properties;
+    const popupHTML = `
+        <div style="font-family: sans-serif; max-width: 250px;">
+            <h3 style="margin: 0 0 10px 0; font-size: 14px; border-bottom: 2px solid #007BFF; padding-bottom: 5px;">
+                ${props.name} County, ${props.state || 'GA'}
+            </h3>
+            <table style="width: 100%; font-size: 12px;">
+                <tr><td style="padding: 3px 5px 3px 0; font-weight: bold;">Population:</td><td style="padding: 3px 0;">${formatNumber(props.population)}</td></tr>
+                <tr><td style="padding: 3px 5px 3px 0; font-weight: bold;">Region:</td><td style="padding: 3px 0;">${props.region || 'N/A'}</td></tr>
+                <tr><td style="padding: 3px 5px 3px 0; font-weight: bold;">Acres:</td><td style="padding: 3px 0;">${formatNumber(props.acres)}</td></tr>
+                <tr><td style="padding: 3px 5px 3px 0; font-weight: bold;">Sq. Miles:</td><td style="padding: 3px 0;">${formatNumber(props.square_miles)}</td></tr>
+            </table>
+        </div>
+    `;
+    new maplibregl.Popup().setLngLat(e.lngLat).setHTML(popupHTML).addTo(map);
+});
+
+map.on('click', 'county-fill-full', (e) => {
+    if (e.features.length === 0) return;
+    const props = e.features[0].properties;
+    const popupHTML = `
+        <div style="font-family: sans-serif; max-width: 250px;">
+            <h3 style="margin: 0 0 10px 0; font-size: 14px; border-bottom: 2px solid #007BFF; padding-bottom: 5px;">
+                ${props.name} County, ${props.state || 'GA'}
+            </h3>
+            <table style="width: 100%; font-size: 12px;">
+                <tr><td style="padding: 3px 5px 3px 0; font-weight: bold;">Population:</td><td style="padding: 3px 0;">${formatNumber(props.population)}</td></tr>
+                <tr><td style="padding: 3px 5px 3px 0; font-weight: bold;">Region:</td><td style="padding: 3px 0;">${props.region || 'N/A'}</td></tr>
+                <tr><td style="padding: 3px 5px 3px 0; font-weight: bold;">Acres:</td><td style="padding: 3px 0;">${formatNumber(props.acres)}</td></tr>
+                <tr><td style="padding: 3px 5px 3px 0; font-weight: bold;">Sq. Miles:</td><td style="padding: 3px 0;">${formatNumber(props.square_miles)}</td></tr>
+            </table>
+        </div>
+    `;
+    new maplibregl.Popup().setLngLat(e.lngLat).setHTML(popupHTML).addTo(map);
+});
+
+// Change cursor on hover for counties
+map.on('mouseenter', 'county-fill-simplified', () => {
+    map.getCanvas().style.cursor = 'pointer';
+});
+map.on('mouseleave', 'county-fill-simplified', () => {
+    map.getCanvas().style.cursor = '';
+});
+map.on('mouseenter', 'county-fill-full', () => {
+    map.getCanvas().style.cursor = 'pointer';
+});
+map.on('mouseleave', 'county-fill-full', () => {
+    map.getCanvas().style.cursor = '';
+});
+
+// Change cursor on hover for parcels
+map.on('mouseenter', 'parcel-fill', () => {
+    map.getCanvas().style.cursor = 'pointer';
+});
+
+map.on('mouseleave', 'parcel-fill', () => {
+    map.getCanvas().style.cursor = '';
+});
+
+// Clear selection when clicking map background
+map.on('click', (e) => {
+    const features = map.queryRenderedFeatures(e.point, { layers: ['parcel-fill'] });
+    if (features.length === 0 && selectedParcelId !== null) {
+        map.setFeatureState(
+            { source: 'parcels', sourceLayer: 'parcels', id: selectedParcelId },
+            { selected: false }
+        );
+        selectedParcelId = null;
     }
-    return tiles;
-}
+});
 
-// Get the minimal bbox covering a set of tiles
-function getTilesBbox(tiles) {
-    const minX = Math.min(...tiles.map(t => t.x)) * TILE_GRID_SIZE;
-    const maxX = (Math.max(...tiles.map(t => t.x)) + 1) * TILE_GRID_SIZE;
-    const minY = Math.min(...tiles.map(t => t.y)) * TILE_GRID_SIZE;
-    const maxY = (Math.max(...tiles.map(t => t.y)) + 1) * TILE_GRID_SIZE;
-    return { minX, maxX, minY, maxY };
-}
+// Add zoom level indicator
+const zoomDisplay = document.createElement('div');
+zoomDisplay.style.cssText = 'position: absolute; bottom: 20px; right: 10px; background: rgba(255,255,255,0.9); padding: 8px 12px; border: 2px solid #333; border-radius: 4px; font-weight: bold; font-size: 14px; z-index: 1000;';
+zoomDisplay.textContent = `Zoom: ${Math.round(map.getZoom() * 10) / 10}`;
+document.body.appendChild(zoomDisplay);
 
-// Fetch and render parcels for the current map viewport (zoom 16+)
-// Uses tile-based grid caching - only fetches missing tiles
-function fetchAndRenderParcels() {
-    const bounds = map.getBounds();
-    const neededTiles = getBboxTiles(bounds);
+map.on('zoom', () => {
+    zoomDisplay.textContent = `Zoom: ${Math.round(map.getZoom() * 10) / 10}`;
+});
+
+// Load county GeoJSON when map is ready
+map.on('load', () => {
+    console.log('Map loaded successfully');
+    console.log('Loading county boundaries...');
     
-    // Filter to only tiles we haven't loaded yet
-    const missingTiles = neededTiles.filter(t => !loadedTiles.has(t.key));
-    
-    if (missingTiles.length === 0) {
-        console.log(`Using cached parcels (all ${neededTiles.length} tiles loaded)`);
-        return;
-    }
-
-    // Prevent duplicate fetches
-    if (parcelFetchInProgress) {
-        console.log('Parcel fetch already in progress, skipping...');
-        return;
-    }
-
-    // Calculate the minimal bbox covering all missing tiles
-    const bbox = getTilesBbox(missingTiles);
-    const url = `${PARCEL_API_BASE}?minX=${bbox.minX}&minY=${bbox.minY}&maxX=${bbox.maxX}&maxY=${bbox.maxY}`;
-
-    console.log(`Fetching ${missingTiles.length} new tiles (${loadedTiles.size} cached):`, bbox);
-    parcelFetchInProgress = true;
-
-    fetch(url)
-        .then(response => {
-            if (!response.ok) {
-                throw new Error('Failed to fetch parcels');
-            }
-            return response.json();
-        })
+    // Load simplified boundaries (shown below zoom 11)
+    fetch('http://localhost:9000/api/counties?detail=simplified')
+        .then(response => response.json())
         .then(data => {
-            // Create parcel layer with CANVAS renderer for better performance
-            if (!parcelLayer) {
-                parcelLayer = L.layerGroup().addTo(map);
-            }
-
-            // ADD new parcels to existing layer using canvas renderer
-            const newParcelLayer = L.geoJSON(data, {
-                renderer: L.canvas(), // Use canvas for fast rendering of many features
-                style: {
-                    color: '#333',
-                    weight: 1,
-                    fillOpacity: 0.1,
-                    fillColor: '#4A90E2'
-                },
-                onEachFeature: function(feature, layer) {
-                    if (feature.properties) {
-                        layer.bindPopup(buildParcelPopupHTML(feature.properties));
-                        
-                        // Add click handler for highlighting
-                        layer.on('click', function() {
-                            // Reset previously selected parcel
-                            if (selectedParcel) {
-                                selectedParcel.setStyle({
-                                    color: '#333',
-                                    weight: 1
-                                });
-                            }
-                            
-                            // Highlight the clicked parcel
-                            layer.setStyle({
-                                color: '#FF6B35',
-                                weight: 3
-                            });
-                            
-                            selectedParcel = layer;
-                        });
-                    }
+            map.addSource('counties-simplified', {
+                type: 'geojson',
+                data: data
+            });
+            
+            map.addLayer({
+                id: 'county-fill-simplified',
+                type: 'fill',
+                source: 'counties-simplified',
+                minzoom: 0,
+                maxzoom: 9,
+                paint: {
+                    'fill-color': '#88C0D0',
+                    'fill-opacity': 0.5
                 }
             });
-
-            // Add each feature to the persistent parcelLayer
-            newParcelLayer.eachLayer(layer => {
-                parcelLayer.addLayer(layer);
+            
+            map.addLayer({
+                id: 'county-outline-simplified',
+                type: 'line',
+                source: 'counties-simplified',
+                minzoom: 0,
+                maxzoom: 9,
+                paint: {
+                    'line-color': '#007BFF',
+                    'line-width': 1
+                }
             });
             
-            // Render parcel labels (additive)
-            renderParcelLabels(data);
+            // Add county name labels
+            map.addLayer({
+                id: 'county-labels',
+                type: 'symbol',
+                source: 'counties-simplified',
+                maxzoom: 11,
+                layout: {
+                    'text-field': ['get', 'name'],
+                    'text-size': 12,
+                    'text-font': ['Noto Sans Regular'],
+                    'text-anchor': 'center'
+                },
+                paint: {
+                    'text-color': '#333333',
+                    'text-halo-color': '#ffffff',
+                    'text-halo-width': 2
+                }
+            });
             
-            // Mark tiles as loaded
-            missingTiles.forEach(t => loadedTiles.add(t.key));
-            
-            const featureCount = data.features ? data.features.length : 0;
-            console.log(`Added ${featureCount} parcels (${loadedTiles.size} tiles cached)`);
+            console.log('Simplified county boundaries loaded');
         })
         .catch(error => {
-            console.error('Error loading parcels:', error);
-        })
-        .finally(() => {
-            parcelFetchInProgress = false;
+            console.error('Error loading simplified counties:', error);
         });
-}
+    
+    // Load full boundaries (shown at zoom 11-15)
+    fetch('http://localhost:9000/api/counties?detail=full')
+        .then(response => response.json())
+        .then(data => {
+            map.addSource('counties-full', {
+                type: 'geojson',
+                data: data
+            });
+            
+            map.addLayer({
+                id: 'county-fill-full',
+                type: 'fill',
+                source: 'counties-full',
+                minzoom: 9,
+                maxzoom: 14,
+                paint: {
+                    'fill-color': '#88C0D0',
+                    'fill-opacity': 0.2
+                }
+            });
+            
+            map.addLayer({
+                id: 'county-outline-full',
+                type: 'line',
+                source: 'counties-full',
+                minzoom: 9,
+                maxzoom: 14,
+                paint: {
+                    'line-color': '#007BFF',
+                    'line-width': 2
+                }
+            });
+            
+            console.log('Full county boundaries loaded');
+        })
+        .catch(error => {
+            console.error('Error loading full counties:', error);
+        });
+});
 
-// Render parcel site number labels at parcel zoom level
-// Additive approach - adds new labels without clearing existing ones
-function renderParcelLabels(geoJsonData) {
-    // Create label layer if it doesn't exist
-    if (!parcelLabelLayerGroup) {
-        parcelLabelLayerGroup = L.layerGroup();
-        // Only add to map if we're at zoom 17+
-        if (map.getZoom() >= PARCEL_LABEL_ZOOM_THRESHOLD) {
-            parcelLabelLayerGroup.addTo(map);
-        }
+// Debug: Log errors (filter out tile parsing errors for empty tiles)
+map.on('error', (e) => {
+    // Suppress tile parsing errors - these are expected for tiles with no/invalid data
+    if (e.error && e.error.message && e.error.message.includes('Unable to parse the tile')) {
+        return; // Silently ignore
     }
-
-    geoJsonData.features.forEach(feature => {
-        const props = feature.properties;
-        const siteNumber = props.site_number;
-
-        // Only render label if site_number exists and centroid is available
-        if (siteNumber && props.centroid && props.centroid.coordinates) {
-            const coords = props.centroid.coordinates;
-            const latlng = L.latLng(coords[1], coords[0]); // GeoJSON is [lon, lat]
-
-            // Create a label marker for site number
-            L.marker(latlng, {
-                icon: L.divIcon({
-                    className: 'parcel-label',
-                    html: `<span style="font-size: 10px; color: #333; white-space: nowrap;">${siteNumber}</span>`,
-                    iconSize: null // No fixed size; auto-size to content
-                })
-            }).addTo(parcelLabelLayerGroup);
-        }
-    });
-}
-
-// Build popup HTML for parcel properties
-function buildParcelPopupHTML(props) {
-    const format = (val) => val ?? 'N/A';
-    return `
-        <div style="font-family: Arial, sans-serif; font-size: 11px; max-width: 200px;">
-            <h4 style="margin: 0 0 8px 0; font-size: 13px;">Parcel ${props.parcel_id || 'Unknown'}</h4>
-            <hr style="margin: 4px 0;">
-            <p style="margin: 4px 0;"><b>Owner:</b> ${format(props.owner_name)}</p>
-            <p style="margin: 4px 0;"><b>Address:</b> ${format(props.site_address)}</p>
-            <p style="margin: 4px 0;"><b>Acres:</b> ${format(props.acres)}</p>
-            <p style="margin: 4px 0;"><b>Classification:</b> ${format(props.classification)}</p>
-        </div>
-    `;
-}
-
-// Initialize the map when the page loads
-initMap();
+    console.error('Map error:', e);
+});

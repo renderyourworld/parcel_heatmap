@@ -12,6 +12,8 @@ import (
 	"github.com/renderyourworld/parcel_heatmap/db"
 	"github.com/renderyourworld/parcel_heatmap/handlers"
 	"github.com/renderyourworld/parcel_heatmap/importers"
+	"github.com/renderyourworld/parcel_heatmap/models"
+	"github.com/renderyourworld/parcel_heatmap/tiles"
 )
 
 func main() {
@@ -20,6 +22,12 @@ func main() {
 	county := flag.String("county", "", "County name to import parcels for")
 	resume := flag.Bool("resume", false, "Resume import from last checkpoint")
 	maxParcels := flag.Int("max-parcels", 0, "Maximum number of parcels to import (0 = no limit, for testing)")
+	skipTiles := flag.Bool("skip-tiles", false, "Skip tile generation after import (for testing)")
+
+	generateTiles := flag.Bool("generate-tiles", false, "Generate vector tiles for existing parcels")
+	minZoom := flag.Int("min-zoom", 13, "Minimum zoom level for tile generation")
+	maxZoom := flag.Int("max-zoom", 19, "Maximum zoom level for tile generation")
+
 	flag.Parse()
 
 	// Load environment variables from .env file (if it exists)
@@ -28,6 +36,29 @@ func main() {
 	// Initialize the database connection
 	db.Connect()
 
+	// Check if we should generate tiles for existing parcels
+	if *generateTiles {
+		if *county == "" {
+			log.Fatal("Error: --county flag is required when using --generate-tiles")
+		}
+
+		log.Printf("Generating tiles for %s county (zoom %d-%d)...", *county, *minZoom, *maxZoom)
+
+		// Look up county
+		var countyRecord models.County
+		if err := db.DB.Where("name = ?", *county).First(&countyRecord).Error; err != nil {
+			log.Fatalf("ERROR: County '%s' not found: %v", *county, err)
+		}
+
+		// Generate tiles
+		if err := tiles.GenerateTilesForCounty(db.DB, countyRecord.ID, *county, *minZoom, *maxZoom); err != nil {
+			log.Fatalf("ERROR: Tile generation failed: %v", err)
+		}
+
+		log.Println("Tile generation completed successfully!")
+		os.Exit(0)
+	}
+
 	// Check if we should run the importer instead of starting the server
 	if *importParcels {
 		if *county == "" {
@@ -35,9 +66,9 @@ func main() {
 		}
 
 		if *maxParcels > 0 {
-			log.Printf("Starting parcel import for %s county (resume=%v, max=%d)", *county, *resume, *maxParcels)
+			log.Printf("Starting parcel import for %s county (resume=%v, max=%d, skip-tiles=%v)", *county, *resume, *maxParcels, *skipTiles)
 		} else {
-			log.Printf("Starting parcel import for %s county (resume=%v)", *county, *resume)
+			log.Printf("Starting parcel import for %s county (resume=%v, skip-tiles=%v)", *county, *resume, *skipTiles)
 		}
 
 		if err := importers.StartParcelImporter(db.DB, *county, *resume, *maxParcels); err != nil {
@@ -46,6 +77,27 @@ func main() {
 		}
 
 		log.Println("Parcel import completed successfully!")
+
+		// Generate tiles after successful import (unless skipped)
+		if !*skipTiles {
+			log.Printf("Generating tiles for %s county (zoom %d-%d)...", *county, *minZoom, *maxZoom)
+
+			// Look up county ID
+			var countyRecord models.County
+			if err := db.DB.Where("name = ?", *county).First(&countyRecord).Error; err != nil {
+				log.Printf("ERROR: Failed to look up county for tile generation: %v", err)
+				os.Exit(1)
+			}
+
+			// Generate tiles
+			if err := tiles.GenerateTilesForCounty(db.DB, countyRecord.ID, *county, *minZoom, *maxZoom); err != nil {
+				log.Printf("ERROR: Tile generation failed: %v", err)
+				os.Exit(1)
+			}
+
+			log.Println("Tile generation completed successfully!")
+		}
+
 		os.Exit(0)
 	}
 
@@ -75,8 +127,8 @@ func main() {
 		// County boundary endpoint with zoom-aware detail switching
 		api.GET("/counties", handlers.GetCountyBoundaries)
 
-		// Parcel endpoint for bbox-based queries with precomputed GeoJSON
-		api.GET("/parcels", handlers.GetParcels)
+		// Vector tile endpoint for pre-generated MVT tiles
+		api.GET("/tiles/:z/:x/:y", handlers.GetVectorTile)
 	}
 
 	// Health check endpoint

@@ -5,19 +5,22 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Parcel Heatmap Project</title>
 
-    <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+    <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.css" />
     
     <style>
+        body { margin: 0; padding: 0; }
         #map {
-            height: 100vh; /* Viewport height */
-            width: 100vw;  /* Viewport width */
+            position: absolute;
+            top: 0;
+            bottom: 0;
+            width: 100%;
         }
     </style>
 </head>
 <body>
     <div id="map"></div>
 
-    <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+    <script src="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.js"></script>
 
     <script src="app.js"></script>
 </body>
