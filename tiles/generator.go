@@ -41,6 +41,8 @@ func GenerateTile(db *gorm.DB, z, x, y int, countyID uint16) ([]byte, error) {
 					$5,    -- buffer pixels (dynamic based on zoom)
 					true   -- clip geometry to tile bounds
 				) AS geom,
+				county_id || '_' || objectid AS feature_id,  -- Composite ID: unique across all counties
+				objectid,
 				parcel_id,
 				site_number,
 				site_address,

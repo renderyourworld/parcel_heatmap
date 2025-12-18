@@ -399,6 +399,7 @@ func fetchTotalCount(baseURL string) (int, error) {
 // insertParcel inserts or updates a parcel in the database
 func insertParcel(db *gorm.DB, parcel *models.Parcel) error {
 	// Use raw SQL for ON CONFLICT handling with PostGIS geometry
+	// Note: Uses (county_id, objectid) as unique constraint since parcel_id can have duplicates
 	sql := `
 		INSERT INTO parcels (
 			county_id, parcel_id, objectid, 
@@ -411,8 +412,8 @@ func insertParcel(db *gorm.DB, parcel *models.Parcel) error {
 			$8, $9, $10,
 			ST_SetSRID(ST_GeomFromGeoJSON($11), 4326), $12, $13, NOW(), NOW(), NOW()
 		)
-		ON CONFLICT (county_id, parcel_id) DO UPDATE SET
-			objectid = EXCLUDED.objectid,
+		ON CONFLICT (county_id, objectid) DO UPDATE SET
+			parcel_id = EXCLUDED.parcel_id,
 			site_address = EXCLUDED.site_address,
 			site_number = EXCLUDED.site_number,
 			owner_name = EXCLUDED.owner_name,

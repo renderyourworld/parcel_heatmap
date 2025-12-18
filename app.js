@@ -21,7 +21,7 @@ const map = new maplibregl.Map({
                 tiles: ['http://localhost:9000/api/tiles/{z}/{x}/{y}'],
                 minzoom: 13,
                 maxzoom: 19,
-                promoteId: 'parcel_id'
+                promoteId: 'feature_id'
             }
         },
         layers: [
@@ -107,8 +107,8 @@ const map = new maplibregl.Map({
 // Add navigation controls
 map.addControl(new maplibregl.NavigationControl(), 'top-right');
 
-// Track selected parcel
-let selectedParcelId = null;
+// Track selected parcel (using feature_id as unique identifier across all counties)
+let selectedFeatureId = null;
 
 // Click handler for parcels
 map.on('click', 'parcel-fill', (e) => {
@@ -117,17 +117,17 @@ map.on('click', 'parcel-fill', (e) => {
     const feature = e.features[0];
     
     // Clear previous selection
-    if (selectedParcelId !== null) {
+    if (selectedFeatureId !== null) {
         map.setFeatureState(
-            { source: 'parcels', sourceLayer: 'parcels', id: selectedParcelId },
+            { source: 'parcels', sourceLayer: 'parcels', id: selectedFeatureId },
             { selected: false }
         );
     }
 
     // Set new selection
-    selectedParcelId = feature.properties.parcel_id;
+    selectedFeatureId = feature.properties.feature_id;
     map.setFeatureState(
-        { source: 'parcels', sourceLayer: 'parcels', id: selectedParcelId },
+        { source: 'parcels', sourceLayer: 'parcels', id: selectedFeatureId },
         { selected: true }
     );
 
@@ -228,12 +228,12 @@ map.on('mouseleave', 'parcel-fill', () => {
 // Clear selection when clicking map background
 map.on('click', (e) => {
     const features = map.queryRenderedFeatures(e.point, { layers: ['parcel-fill'] });
-    if (features.length === 0 && selectedParcelId !== null) {
+    if (features.length === 0 && selectedFeatureId !== null) {
         map.setFeatureState(
-            { source: 'parcels', sourceLayer: 'parcels', id: selectedParcelId },
+            { source: 'parcels', sourceLayer: 'parcels', id: selectedFeatureId },
             { selected: false }
         );
-        selectedParcelId = null;
+        selectedFeatureId = null;
     }
 });
 
