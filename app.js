@@ -320,23 +320,11 @@ map.on('load', () => {
             });
             
             map.addLayer({
-                id: 'county-fill-full',
-                type: 'fill',
-                source: 'counties-full',
-                minzoom: 9,
-                maxzoom: 14,
-                paint: {
-                    'fill-color': '#88C0D0',
-                    'fill-opacity': 0.2
-                }
-            });
-            
-            map.addLayer({
                 id: 'county-outline-full',
                 type: 'line',
                 source: 'counties-full',
                 minzoom: 9,
-                maxzoom: 14,
+                maxzoom: 13,
                 paint: {
                     'line-color': '#007BFF',
                     'line-width': 2

@@ -97,6 +97,6 @@ func GetVectorTile(c *gin.Context) {
 
 	// Return uncompressed MVT tile
 	c.Header("Content-Type", "application/x-protobuf")
-	c.Header("Cache-Control", "public, max-age=86400") // Cache for 24 hours
+	c.Header("Cache-Control", "public, max-age=2592000, immutable") // Cache for 30 days, tiles never change
 	c.Data(http.StatusOK, "application/x-protobuf", uncompressed)
 }

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"time"
 
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
@@ -32,7 +33,19 @@ func Connect() *gorm.DB {
 		log.Fatalf("Failed to connect to database: %v", err)
 	}
 
-	log.Println("Database connection established.")
+	// Get the underlying *sql.DB for connection pool configuration
+	sqlDB, err := db.DB()
+	if err != nil {
+		log.Fatalf("Failed to get database instance: %v", err)
+	}
+
+	// Configure connection pool for optimal performance
+	sqlDB.SetMaxOpenConns(25)                      // Max concurrent connections (good for 16GB RAM)
+	sqlDB.SetMaxIdleConns(5)                       // Keep 5 idle connections ready for bursts
+	sqlDB.SetConnMaxLifetime(5 * time.Minute)      // Recycle connections after 5 minutes
+	sqlDB.SetConnMaxIdleTime(1 * time.Minute)      // Close idle connections after 1 minute
+
+	log.Println("Database connection established with connection pooling.")
 	DB = db
 	return DB
 }
