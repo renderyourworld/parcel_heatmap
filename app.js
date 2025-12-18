@@ -1,105 +1,20 @@
-// MapLibre Vector Tiles
+// MapLibre Vector Tiles with OpenFreeMap
 const GEORGIA_CENTER = [-83.6, 32.8]; // [lng, lat]
 const INITIAL_ZOOM = 7;
 
-// Initialize the map
+// Load theme preference from localStorage or detect system preference
+let currentTheme = localStorage.getItem('mapTheme');
+if (!currentTheme) {
+    currentTheme = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+}
+
+// Initialize the map with OpenFreeMap style
 const map = new maplibregl.Map({
     container: 'map',
     maxZoom: 19,
-    style: {
-        version: 8,
-        glyphs: 'https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf',
-        sources: {
-            'osm': {
-                type: 'raster',
-                tiles: ['https://a.tile.openstreetmap.org/{z}/{x}/{y}.png'],
-                tileSize: 256,
-                attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
-            },
-            'parcels': {
-                type: 'vector',
-                tiles: ['http://localhost:9000/api/tiles/{z}/{x}/{y}'],
-                minzoom: 13,
-                maxzoom: 19,
-                promoteId: 'feature_id'
-            }
-        },
-        layers: [
-            {
-                id: 'osm-tiles',
-                type: 'raster',
-                source: 'osm',
-                minzoom: 0,
-                maxzoom: 22
-            },
-            {
-                id: 'parcel-fill',
-                type: 'fill',
-                source: 'parcels',
-                'source-layer': 'parcels',
-                minzoom: 13,
-                paint: {
-                    'fill-color': [
-                        'case',
-                        ['boolean', ['feature-state', 'selected'], false],
-                        '#ff6b6b',
-                        '#3388ff'
-                    ],
-                    'fill-opacity': [
-                        'case',
-                        ['boolean', ['feature-state', 'selected'], false],
-                        0.6,
-                        0.2
-                    ]
-                }
-            },
-            {
-                id: 'parcel-outline',
-                type: 'line',
-                source: 'parcels',
-                'source-layer': 'parcels',
-                minzoom: 13,
-                paint: {
-                    'line-color': [
-                        'case',
-                        ['boolean', ['feature-state', 'selected'], false],
-                        '#ff0000',
-                        '#3388ff'
-                    ],
-                    'line-width': [
-                        'case',
-                        ['boolean', ['feature-state', 'selected'], false],
-                        3,
-                        1
-                    ]
-                }
-            },
-            {
-                id: 'parcel-labels',
-                type: 'symbol',
-                source: 'parcels',
-                'source-layer': 'parcels',
-                minzoom: 15,
-                layout: {
-                    'text-field': ['get', 'site_number'],
-                    'text-size': 10,
-                    'text-font': ['Noto Sans Regular'],
-                    'text-anchor': 'center',
-                    'symbol-avoid-edges': true,
-                    'symbol-z-order': 'auto',
-                    'symbol-placement': 'point',
-                    'text-allow-overlap': false,
-                    'text-ignore-placement': false,
-                    'text-optional': true
-                },
-                paint: {
-                    'text-color': '#333333',
-                    'text-halo-color': '#ffffff',
-                    'text-halo-width': 1.5
-                }
-            }
-        ]
-    },
+    style: currentTheme === 'dark' 
+        ? 'https://tiles.openfreemap.org/styles/dark'
+        : 'https://tiles.openfreemap.org/styles/liberty',
     center: GEORGIA_CENTER,
     zoom: INITIAL_ZOOM
 });
@@ -247,94 +162,29 @@ map.on('zoom', () => {
     zoomDisplay.textContent = `Zoom: ${Math.round(map.getZoom() * 10) / 10}`;
 });
 
-// Load county GeoJSON when map is ready
+// Pre-fetch and cache county boundaries
+console.log('Pre-fetching county boundaries...');
+let simplifiedCountiesData = null;
+let fullCountiesData = null;
+const simplifiedCountiesPromise = fetch('http://localhost:9000/api/counties?detail=simplified')
+    .then(r => r.json())
+    .then(data => { simplifiedCountiesData = data; return data; });
+const fullCountiesPromise = fetch('http://localhost:9000/api/counties?detail=full')
+    .then(r => r.json())
+    .then(data => { fullCountiesData = data; return data; });
+
+// Load county GeoJSON and add parcel layers when map is ready
 map.on('load', () => {
     console.log('Map loaded successfully');
-    console.log('Loading county boundaries...');
     
-    // Load simplified boundaries (shown below zoom 11)
-    fetch('http://localhost:9000/api/counties?detail=simplified')
-        .then(response => response.json())
-        .then(data => {
-            map.addSource('counties-simplified', {
-                type: 'geojson',
-                data: data
-            });
-            
-            map.addLayer({
-                id: 'county-fill-simplified',
-                type: 'fill',
-                source: 'counties-simplified',
-                minzoom: 0,
-                maxzoom: 9,
-                paint: {
-                    'fill-color': '#88C0D0',
-                    'fill-opacity': 0.5
-                }
-            });
-            
-            map.addLayer({
-                id: 'county-outline-simplified',
-                type: 'line',
-                source: 'counties-simplified',
-                minzoom: 0,
-                maxzoom: 9,
-                paint: {
-                    'line-color': '#007BFF',
-                    'line-width': 1
-                }
-            });
-            
-            // Add county name labels
-            map.addLayer({
-                id: 'county-labels',
-                type: 'symbol',
-                source: 'counties-simplified',
-                maxzoom: 11,
-                layout: {
-                    'text-field': ['get', 'name'],
-                    'text-size': 12,
-                    'text-font': ['Noto Sans Regular'],
-                    'text-anchor': 'center'
-                },
-                paint: {
-                    'text-color': '#333333',
-                    'text-halo-color': '#ffffff',
-                    'text-halo-width': 2
-                }
-            });
-            
-            console.log('Simplified county boundaries loaded');
+    // Wait for county data to be fetched, then add all layers
+    Promise.all([simplifiedCountiesPromise, fullCountiesPromise])
+        .then(() => {
+            addCustomLayers();
+            console.log('All layers added');
         })
         .catch(error => {
-            console.error('Error loading simplified counties:', error);
-        });
-    
-    // Load full boundaries (shown at zoom 11-15)
-    fetch('http://localhost:9000/api/counties?detail=full')
-        .then(response => response.json())
-        .then(data => {
-            map.addSource('counties-full', {
-                type: 'geojson',
-                data: data
-            });
-            
-            map.addLayer({
-                id: 'county-outline-full',
-                type: 'line',
-                source: 'counties-full',
-                minzoom: 9,
-                maxzoom: 13,
-                paint: {
-                    'line-color': '#007BFF',
-                    'line-width': 2
-                }
-            });
-            
-            console.log('Full county boundaries loaded');
-        })
-        .catch(error => {
-            console.error('Error loading full counties:', error);
+            console.error('Error loading county data:', error);
         });
 });
 
@@ -345,4 +195,195 @@ map.on('error', (e) => {
         return; // Silently ignore
     }
     console.error('Map error:', e);
+});
+
+// Theme toggle functionality
+const themeToggle = document.getElementById('themeToggle');
+
+function addCustomLayers() {
+    // Add parcel source and layers
+    map.addSource('parcels', {
+        type: 'vector',
+        tiles: ['http://localhost:9000/api/tiles/{z}/{x}/{y}'],
+        minzoom: 13,
+        maxzoom: 19,
+        promoteId: 'feature_id'
+    });
+    
+    map.addLayer({
+        id: 'parcel-fill',
+        type: 'fill',
+        source: 'parcels',
+        'source-layer': 'parcels',
+        minzoom: 13,
+        paint: {
+            'fill-color': ['case', ['boolean', ['feature-state', 'selected'], false], '#ff6b6b', '#3388ff'],
+            'fill-opacity': 0.4
+        }
+    });
+    
+    map.addLayer({
+        id: 'parcel-outline',
+        type: 'line',
+        source: 'parcels',
+        'source-layer': 'parcels',
+        minzoom: 13,
+        paint: {
+            'line-color': ['case', ['boolean', ['feature-state', 'selected'], false], '#ff0000', '#3388ff'],
+            'line-width': ['case', ['boolean', ['feature-state', 'selected'], false], 2, 0.5]
+        }
+    });
+    
+    map.addLayer({
+        id: 'parcel-labels',
+        type: 'symbol',
+        source: 'parcels',
+        'source-layer': 'parcels',
+        minzoom: 15,
+        layout: {
+            'text-field': ['get', 'site_number'],
+            'text-size': 10,
+            'text-font': ['Noto Sans Regular'],
+            'text-anchor': 'center',
+            'text-optional': true
+        },
+        paint: {
+            'text-color': '#333333',
+            'text-halo-color': '#ffffff',
+            'text-halo-width': 1.5
+        }
+    });
+    
+    // Override road label layers to show at zoom 12+
+    const style = map.getStyle();
+    if (style && style.layers) {
+        style.layers.forEach(layer => {
+            if (layer.type === 'symbol' && 
+                layer['source-layer'] === 'transportation_name' &&
+                layer.layout && layer.layout['text-field']) {
+                map.setLayerZoomRange(layer.id, 12, 24);
+            }
+        });
+    }
+    
+    // Add county boundaries (use cached data)
+    if (simplifiedCountiesData) {
+        map.addSource('counties-simplified', {
+            type: 'geojson',
+            data: simplifiedCountiesData
+        });
+        
+        map.addLayer({
+            id: 'county-fill-simplified',
+            type: 'fill',
+            source: 'counties-simplified',
+            minzoom: 0,
+            maxzoom: 11,
+            paint: { 'fill-color': '#88C0D0', 'fill-opacity': 0.5 }
+        });
+        
+        map.addLayer({
+            id: 'county-outline-simplified',
+            type: 'line',
+            source: 'counties-simplified',
+            minzoom: 0,
+            maxzoom: 11,
+            paint: { 'line-color': '#007BFF', 'line-width': 0.5 }
+        });
+        
+        map.addLayer({
+            id: 'county-labels',
+            type: 'symbol',
+            source: 'counties-simplified',
+            maxzoom: 11,
+            layout: {
+                'text-field': ['get', 'name'],
+                'text-size': 12,
+                'text-font': ['Noto Sans Regular'],
+                'text-anchor': 'center'
+            },
+            paint: { 'text-color': '#333333', 'text-halo-color': '#ffffff', 'text-halo-width': 2 }
+        });
+    }
+    
+    if (fullCountiesData) {
+        map.addSource('counties-full', {
+            type: 'geojson',
+            data: fullCountiesData
+        });
+        
+        map.addLayer({
+            id: 'county-outline-full',
+            type: 'line',
+            source: 'counties-full',
+            minzoom: 10,
+            maxzoom: 13,
+            paint: { 'line-color': '#007BFF', 'line-width': 1 }
+        });
+    }
+}
+
+function updateTheme(theme) {
+    const styleUrl = theme === 'dark' 
+        ? 'https://tiles.openfreemap.org/styles/dark'
+        : 'https://tiles.openfreemap.org/styles/liberty';
+    
+    // Save current map state
+    const center = map.getCenter();
+    const zoom = map.getZoom();
+    const bearing = map.getBearing();
+    const pitch = map.getPitch();
+    
+    // Switch style (preserving transformRequest)
+    map.setStyle(styleUrl, { diff: false });
+    
+    // Re-add custom layers after style loads
+    map.once('styledata', () => {
+        // Restore position first
+        map.jumpTo({
+            center: center,
+            zoom: zoom,
+            bearing: bearing,
+            pitch: pitch
+        });
+        
+        // Add custom layers
+        addCustomLayers();
+        console.log('Theme switched to', theme);
+    });
+    
+    // Update button appearance
+    if (theme === 'dark') {
+        themeToggle.textContent = '☀️ Light Mode';
+        themeToggle.classList.add('dark');
+    } else {
+        themeToggle.textContent = '🌙 Dark Mode';
+        themeToggle.classList.remove('dark');
+    }
+    
+    // Save preference
+    localStorage.setItem('mapTheme', theme);
+    currentTheme = theme;
+}
+
+// Initialize button state
+if (currentTheme === 'dark') {
+    themeToggle.textContent = '☀️ Light Mode';
+    themeToggle.classList.add('dark');
+} else {
+    themeToggle.textContent = '🌙 Dark Mode';
+    themeToggle.classList.remove('dark');
+}
+
+// Toggle theme on button click
+themeToggle.addEventListener('click', () => {
+    const newTheme = currentTheme === 'light' ? 'dark' : 'light';
+    updateTheme(newTheme);
+});
+
+// Listen for system theme changes
+window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', (e) => {
+    if (!localStorage.getItem('mapTheme')) { // Only auto-switch if user hasn't manually chosen
+        updateTheme(e.matches ? 'dark' : 'light');
+    }
 });
