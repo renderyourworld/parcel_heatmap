@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/renderyourworld/parcel_heatmap/models"
+	"github.com/renderyourworld/parcel_heatmap/utils"
 	"gorm.io/gorm"
 )
 
@@ -29,12 +30,13 @@ const (
 // StartParcelImporter fetches parcel data from ArcGIS REST API using checkpoint-based resumable import
 // Processes parcels in batches for efficient API usage while inserting individually for tracking errors
 // maxParcels limits the total number of parcels to import (0 = no limit, useful for testing)
-func StartParcelImporter(db *gorm.DB, countyName string, resume bool, maxParcels int) error {
+// logPerf enables performance logging with time elapsed and transactions per second
+func StartParcelImporter(gormDB *gorm.DB, countyName string, resume bool, maxParcels int, logPerf bool) error {
 	log.Printf("Starting parcel importer for %s (resume=%v)", countyName, resume)
 
 	// Look up county and validate configuration
 	var county models.County
-	if err := db.Where("name = ?", countyName).First(&county).Error; err != nil {
+	if err := gormDB.Where("name = ?", countyName).First(&county).Error; err != nil {
 		return fmt.Errorf("county '%s' not found: %w", countyName, err)
 	}
 
@@ -45,7 +47,7 @@ func StartParcelImporter(db *gorm.DB, countyName string, resume bool, maxParcels
 	log.Printf("Found county: %s (ID: %d, API: %s)", county.Name, county.ID, county.GisApiUrl.String)
 
 	// Load field mappings
-	mappings, err := loadFieldMappings(db, county.ID)
+	mappings, err := loadFieldMappings(gormDB, county.ID)
 	if err != nil {
 		return fmt.Errorf("failed to load field mappings: %w", err)
 	}
@@ -63,12 +65,18 @@ func StartParcelImporter(db *gorm.DB, countyName string, resume bool, maxParcels
 	}
 
 	// Initialize or resume checkpoint
-	checkpoint, err := initializeCheckpoint(db, countyName, resume)
+	checkpoint, err := initializeCheckpoint(gormDB, countyName, resume)
 	if err != nil {
 		return err
 	}
 
 	log.Printf("Checkpoint initialized: last_processed_id=%d, status=%s", checkpoint.LastProcessedID, checkpoint.Status)
+
+	// Initialize performance logger
+	perfLogger := utils.NewPerfLogger(logPerf)
+	if logPerf {
+		log.Println("Performance logging enabled")
+	}
 
 	// Fetch total parcel count for progress tracking
 	totalCount, err := fetchTotalCount(county.GisApiUrl.String)
@@ -95,7 +103,7 @@ func StartParcelImporter(db *gorm.DB, countyName string, resume bool, maxParcels
 		params.Set("resultRecordCount", fmt.Sprintf("%d", batchSize))
 		params.Set("outFields", "*")
 		params.Set("returnGeometry", "true")
-		params.Set("outSR", "4326")
+		params.Set("outSR", "3857")
 		params.Set("f", "geoJson")
 		params.Set("orderByFields", fmt.Sprintf("%s ASC", objectIDField))
 
@@ -211,16 +219,11 @@ func StartParcelImporter(db *gorm.DB, countyName string, resume bool, maxParcels
 			break
 		}
 
-		log.Printf("Processing %d features in batch...", len(featureCollection.Features))
-
-		// Process each feature individually
-		batchSuccessCount := 0
-		batchFailCount := 0
-		maxObjectIDInBatch := currentOffset
-
+		// Map all features to parcels first
+		parcels := make([]*models.Parcel, 0, len(featureCollection.Features))
 		for _, feature := range featureCollection.Features {
-			// Check if we've reached the max parcels limit (check successful inserts only)
-			if maxParcels > 0 && successCount+batchSuccessCount >= maxParcels {
+			// Check if we've reached the max parcels limit
+			if maxParcels > 0 && successCount+len(parcels) >= maxParcels {
 				log.Printf("Reached max parcels limit (%d). Stopping import.", maxParcels)
 				break
 			}
@@ -229,24 +232,35 @@ func StartParcelImporter(db *gorm.DB, countyName string, resume bool, maxParcels
 			parcel, errMsg := mapFeatureToParcel(feature.Properties, feature.Geometry, mappings, county.ID)
 
 			if errMsg != "" {
-				// Mapping failed - insert with error tracking
-				parcel.Processed = sql.NullBool{Bool: false, Valid: true} // FALSE = error
+				// Mapping failed - mark with error
+				parcel.Processed = sql.NullBool{Bool: false, Valid: true}
 				parcel.ErrorMessage = sql.NullString{String: errMsg, Valid: true}
-				batchFailCount++
 				log.Printf("Failed to map parcel: %s", errMsg)
-			} else {
-				batchSuccessCount++
-				// Processed remains NULL (zero value) = success
 			}
 
-			// Insert or update parcel
-			if err := insertParcel(db, parcel); err != nil {
+			parcels = append(parcels, parcel)
+		}
+
+		// Insert parcels one at a time for error tracking
+		batchSuccessCount := 0
+		batchFailCount := 0
+		maxObjectIDInBatch := currentOffset
+
+		for _, parcel := range parcels {
+			if err := insertParcel(gormDB, parcel); err != nil {
 				log.Printf("ERROR: Failed to insert parcel %s: %v", parcel.ParcelID, err)
 				batchFailCount++
 				continue
 			}
 
-			// Track max OBJECTID in this batch
+			// Track success/fail based on mapping errors
+			if parcel.Processed.Valid && !parcel.Processed.Bool {
+				batchFailCount++
+			} else {
+				batchSuccessCount++
+			}
+
+			// Track max OBJECTID
 			if parcel.ObjectID.Valid && parcel.ObjectID.Int64 > maxObjectIDInBatch {
 				maxObjectIDInBatch = parcel.ObjectID.Int64
 			}
@@ -257,9 +271,12 @@ func StartParcelImporter(db *gorm.DB, countyName string, resume bool, maxParcels
 		failCount += batchFailCount
 		currentOffset = maxObjectIDInBatch
 
-		if err := updateCheckpoint(db, countyName, maxObjectIDInBatch, successCount, failCount); err != nil {
+		if err := updateCheckpoint(gormDB, countyName, maxObjectIDInBatch, successCount, failCount); err != nil {
 			log.Printf("Warning: Failed to update checkpoint: %v", err)
 		}
+
+		// Update performance logger
+		perfLogger.Update(successCount, 10*time.Second)
 
 		// Log progress
 		if totalCount > 0 {
@@ -281,23 +298,14 @@ func StartParcelImporter(db *gorm.DB, countyName string, resume bool, maxParcels
 	}
 
 	// Mark import as complete
-	if err := completeCheckpoint(db, countyName, successCount, failCount); err != nil {
+	if err := completeCheckpoint(gormDB, countyName, successCount, failCount); err != nil {
 		log.Printf("Warning: Failed to mark checkpoint complete: %v", err)
 	}
 
-	// Calculate centroids for processed parcels
-	log.Println("Calculating centroids for processed parcels...")
-	if err := db.Exec(`
-		UPDATE parcels 
-		SET centroid = ST_Centroid(geometry) 
-		WHERE county_id = ? AND centroid IS NULL AND processed IS NULL
-	`, county.ID).Error; err != nil {
-		log.Printf("Warning: Failed to calculate centroids: %v", err)
-	} else {
-		log.Println("Centroids calculated successfully")
-	}
-
 	log.Printf("Import complete! Total processed: %d, Failed: %d", successCount, failCount)
+
+	// Log final performance summary
+	perfLogger.LogFinal()
 
 	return nil
 }
@@ -410,7 +418,7 @@ func insertParcel(db *gorm.DB, parcel *models.Parcel) error {
 			$1, $2, $3,
 			$4, $5, $6, $7,
 			$8, $9, $10,
-			ST_SetSRID(ST_GeomFromGeoJSON($11), 4326), $12, $13, NOW(), NOW(), NOW()
+			ST_SetSRID(ST_GeomFromGeoJSON($11), 3857), $12, $13, NOW(), NOW(), NOW()
 		)
 		ON CONFLICT (county_id, objectid) DO UPDATE SET
 			parcel_id = EXCLUDED.parcel_id,

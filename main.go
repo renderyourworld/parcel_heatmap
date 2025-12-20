@@ -28,6 +28,8 @@ func main() {
 	minZoom := flag.Int("min-zoom", 13, "Minimum zoom level for tile generation")
 	maxZoom := flag.Int("max-zoom", 19, "Maximum zoom level for tile generation")
 
+	logPerf := flag.Bool("logPerf", false, "Enable performance logging (time elapsed, transactions per second)")
+
 	flag.Parse()
 
 	// Load environment variables from .env file (if it exists)
@@ -51,7 +53,7 @@ func main() {
 		}
 
 		// Generate tiles
-		if err := tiles.GenerateTilesForCounty(db.DB, countyRecord.ID, *county, *minZoom, *maxZoom); err != nil {
+		if err := tiles.GenerateTilesForCounty(db.DB, countyRecord.ID, *county, *minZoom, *maxZoom, *logPerf); err != nil {
 			log.Fatalf("ERROR: Tile generation failed: %v", err)
 		}
 
@@ -71,7 +73,7 @@ func main() {
 			log.Printf("Starting parcel import for %s county (resume=%v, skip-tiles=%v)", *county, *resume, *skipTiles)
 		}
 
-		if err := importers.StartParcelImporter(db.DB, *county, *resume, *maxParcels); err != nil {
+		if err := importers.StartParcelImporter(db.DB, *county, *resume, *maxParcels, *logPerf); err != nil {
 			log.Printf("ERROR: Parcel import failed: %v", err)
 			os.Exit(1)
 		}
@@ -90,7 +92,7 @@ func main() {
 			}
 
 			// Generate tiles
-			if err := tiles.GenerateTilesForCounty(db.DB, countyRecord.ID, *county, *minZoom, *maxZoom); err != nil {
+			if err := tiles.GenerateTilesForCounty(db.DB, countyRecord.ID, *county, *minZoom, *maxZoom, *logPerf); err != nil {
 				log.Printf("ERROR: Tile generation failed: %v", err)
 				os.Exit(1)
 			}
@@ -121,6 +123,11 @@ func main() {
 	// Enable GZIP compression for responses
 	router.Use(gzip.Gzip(gzip.DefaultCompression))
 
+	// Serve static files (index.html, app.js, etc.)
+	router.StaticFile("/", "./index.html")
+	router.StaticFile("/index.html", "./index.html")
+	router.StaticFile("/app.js", "./app.js")
+
 	// Register API routes
 	api := router.Group("/api")
 	{
@@ -139,6 +146,6 @@ func main() {
 	})
 
 	// Start the server
-	log.Println("Parcel Heatmap server starting at http://localhost:9000")
+	log.Println("Parcel Heatmap server starting on port 9000")
 	router.Run(":9000")
 }

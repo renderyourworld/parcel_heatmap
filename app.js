@@ -18,7 +18,7 @@ const map = new maplibregl.Map({
             },
             'parcels': {
                 type: 'vector',
-                tiles: ['http://localhost:9000/api/tiles/{z}/{x}/{y}'],
+                tiles: [`${window.location.origin}/api/tiles/{z}/{x}/{y}`],
                 minzoom: 13,
                 maxzoom: 19,
                 promoteId: 'feature_id'
@@ -136,7 +136,7 @@ map.on('click', 'parcel-fill', (e) => {
     const popupHTML = `
         <div style="font-family: sans-serif; max-width: 300px;">
             <h3 style="margin: 0 0 10px 0; font-size: 14px; border-bottom: 2px solid #3388ff; padding-bottom: 5px;">
-                Parcel ${props.site_number || 'N/A'}
+                ${props.site_address || `Parcel: ${props.parcel_id}`}
             </h3>
             <table style="width: 100%; font-size: 12px;">
                 <tr><td style="padding: 3px 5px 3px 0; font-weight: bold;">Parcel ID:</td><td style="padding: 3px 0;">${props.parcel_id || 'N/A'}</td></tr>
@@ -253,7 +253,7 @@ map.on('load', () => {
     console.log('Loading county boundaries...');
     
     // Load simplified boundaries (shown below zoom 11)
-    fetch('http://localhost:9000/api/counties?detail=simplified')
+    fetch('/api/counties?detail=simplified')
         .then(response => response.json())
         .then(data => {
             map.addSource('counties-simplified', {
@@ -311,7 +311,7 @@ map.on('load', () => {
         });
     
     // Load full boundaries (shown at zoom 11-15)
-    fetch('http://localhost:9000/api/counties?detail=full')
+    fetch('/api/counties?detail=full')
         .then(response => response.json())
         .then(data => {
             map.addSource('counties-full', {
