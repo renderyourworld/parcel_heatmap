@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"log"
+	"mime"
 	"os"
 
 	"github.com/gin-contrib/cors"
@@ -17,6 +18,8 @@ import (
 )
 
 func main() {
+	mime.AddExtensionType(".pmtiles", "application/octet-stream")
+
 	// Parse command-line flags
 	importParcels := flag.Bool("import-parcels", false, "Run parcel importer for specified county")
 	county := flag.String("county", "", "County name to import parcels for")
@@ -121,12 +124,26 @@ func main() {
 	router.Use(cors.Default())
 
 	// Enable GZIP compression for responses
-	router.Use(gzip.Gzip(gzip.DefaultCompression))
+	router.Use(gzip.Gzip(
+		gzip.DefaultCompression,
+		gzip.WithExcludedPaths([]string{"/georgia.pmtiles"}),
+	))
 
 	// Serve static files (index.html, app.js, etc.)
 	router.StaticFile("/", "./index.html")
 	router.StaticFile("/index.html", "./index.html")
-	router.StaticFile("/app.js", "./app.js")
+
+	// No cache for dev work
+	router.GET("/app.js", func(c *gin.Context) {
+		c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
+		c.Header("Pragma", "no-cache")
+		c.Header("Expires", "0")
+		c.File("./app.js")
+	})
+
+	router.StaticFile("/styles/light.json", "./styles/light.json")
+	router.StaticFile("/styles/dark.json", "./styles/dark.json")
+	router.StaticFile("/georgia.pmtiles", "./tiles/georgia.pmtiles")
 
 	// Register API routes
 	api := router.Group("/api")
