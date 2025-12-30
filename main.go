@@ -2,9 +2,12 @@ package main
 
 import (
 	"flag"
+	"fmt"
+	"io"
 	"log"
 	"mime"
 	"os"
+	atomic "sync/atomic"
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-contrib/gzip"
@@ -18,11 +21,12 @@ import (
 )
 
 func main() {
-	mime.AddExtensionType(".pmtiles", "application/octet-stream")
+	mime.AddExtensionType(".pmtiles", "application/vnd.pmtiles")
 
 	// Parse command-line flags
 	importParcels := flag.Bool("import-parcels", false, "Run parcel importer for specified county")
 	importTaxes := flag.Bool("import-taxes", false, "Run parcel tax importer for specified county")
+	importCounties := flag.Bool("import-counties", false, "Import all Georgia county boundaries from SAGIS API")
 	county := flag.String("county", "", "County name to import parcels for")
 	resume := flag.Bool("resume", false, "Resume import from last checkpoint")
 	maxParcels := flag.Int("max-parcels", 0, "Maximum number of parcels to import (0 = no limit, for testing)")
@@ -119,21 +123,53 @@ func main() {
 		os.Exit(0)
 	}
 
+	if *importCounties {
+		log.Println("Starting county boundary import from SAGIS API...")
+		if err := importers.StartCountyImporter(db.DB); err != nil {
+			log.Printf("County import completed with errors: %v", err)
+			os.Exit(1)
+		}
+		log.Println("County import completed successfully!")
+		os.Exit(0)
+	}
+
+	// Initialize the Parcel tile cache
+	tiles.InitParcelTilesCache()
+
+	// Initialize PMTiles cache
+	if err := tiles.InitPMTilesCache(); err != nil {
+		log.Fatalf("ERROR: Failed to initialize PMTiles cache: %v", err)
+	}
+
+	// Pre-warm PMTiles cache (first 100KB)
+	go func() {
+		file, err := os.Open("./tiles/georgia.pmtiles")
+		if err == nil {
+			defer file.Close()
+			limit := 100 * 1024
+			data := make([]byte, limit)
+			n, err := file.Read(data)
+			if err == nil || err == io.EOF {
+				if n > 0 {
+					headerRange := fmt.Sprintf("bytes=0-%d", n-1)
+					if tiles.PMTilesCache != nil {
+						atomic.AddUint64(&tiles.PMTilesSize, uint64(n))
+						tiles.PMTilesCache.Add(headerRange, data[:n])
+					}
+					log.Printf("PMTiles cache pre-warmed with first %d bytes", n)
+				}
+			} else {
+				log.Printf("WARNING: Failed to read PMTiles for pre-warming: %v", err)
+			}
+		} else {
+			log.Printf("WARNING: Failed to open PMTiles for pre-warming: %v", err)
+		}
+	}()
+
 	// Preload county boundary data
 	if err := handlers.LoadCountyBoundaries(db.DB); err != nil {
 		log.Fatalf("ERROR: Failed to load county boundaries: %v", err)
 	}
-
-	// Optional: Start the Georgia County importer to populate county boundaries
-	// Uncomment the lines below to import all 159 counties from SAGIS API (~2-3 minutes)
-	// Then comment back out to prevent re-importing on every restart
-	//
-	// log.Println("Starting county boundary import from SAGIS API...")
-	// if err := importers.StartCountyImporter(db.DB); err != nil {
-	// 	log.Printf("County import completed with errors: %v", err)
-	// } else {
-	// 	log.Println("County import completed successfully!")
-	// }
 
 	// Create a new Gin router
 	router := gin.Default()
@@ -165,7 +201,7 @@ func main() {
 
 	router.StaticFile("/styles/light.json", "./styles/light.json")
 	router.StaticFile("/styles/dark.json", "./styles/dark.json")
-	router.StaticFile("/georgia.pmtiles", "./tiles/georgia.pmtiles")
+	router.GET("/georgia.pmtiles", handlers.ServePMTilesWithCache)
 
 	// Register API routes
 	api := router.Group("/api")
@@ -176,6 +212,9 @@ func main() {
 
 		// Vector tile endpoint for pre-generated MVT tiles
 		api.GET("/tiles/:z/:x/:y", handlers.GetVectorTile)
+
+		// Cache stats endpoint
+		api.GET("/cache/stats", handlers.GetCacheStats)
 	}
 
 	// Health check endpoint
