@@ -14,10 +14,16 @@ function formatNumber(num) {
 
 async function loadMap() {
     const response = await fetch('/styles/light.json');
-    const data = await response.json(); 
+    const data = await response.json();
     const basemapLayers = data.layers;
 
-    // Custom Parcel Layers
+    // Preload county boundary data
+    const [simplifiedCounties, fullCounties] = await Promise.all([
+        fetch('/api/counties/simplified').then(r => r.json()),
+        fetch('/api/counties/full').then(r => r.json())
+    ]);
+
+    // Parcel Layers
     const parcelLayers = [
         {
             id: 'parcel-fill',
@@ -67,6 +73,60 @@ async function loadMap() {
         }
     ];
 
+    // County Boundary Layers
+    const countyLayers = [
+        {
+            id: 'county-fill-simplified',
+            type: 'fill',
+            source: 'counties-simplified',
+            minzoom: 0,
+            maxzoom: 9,
+            paint: {
+                'fill-color': '#88C0D0',
+                'fill-opacity': 0.5
+            }
+        },
+        {
+            id: 'county-outline-simplified',
+            type: 'line',
+            source: 'counties-simplified',
+            minzoom: 0,
+            maxzoom: 9,
+            paint: {
+                'line-color': '#007BFF',
+                'line-width': 1
+            }
+        },
+        {
+            id: 'county-labels',
+            type: 'symbol',
+            source: 'counties-simplified',
+            maxzoom: 11,
+            layout: {
+                'text-field': ['get', 'name'],
+                'text-size': 12,
+                'text-font': ['Noto Sans Regular'],
+                'text-anchor': 'center'
+            },
+            paint: {
+                'text-color': '#333333',
+                'text-halo-color': '#ffffff',
+                'text-halo-width': 2
+            }
+        },
+        {
+            id: 'county-outline-full',
+            type: 'line',
+            source: 'counties-full',
+            minzoom: 9,
+            maxzoom: 19,
+            paint: {
+                'line-color': '#007BFF',
+                'line-width': 1
+            }
+        }
+    ];
+
     // Initialize the map
     const map = new maplibregl.Map({
         container: 'map',
@@ -90,9 +150,17 @@ async function loadMap() {
                     minzoom: 13,
                     maxzoom: 19,
                     promoteId: 'feature_id'
+                },
+                'counties-simplified': {
+                    type: 'geojson',
+                    data: simplifiedCounties
+                },
+                'counties-full': {
+                    type: 'geojson',
+                    data: fullCounties
                 }
             },
-            layers: [...basemapLayers, ...parcelLayers]
+            layers: [...basemapLayers, ...countyLayers, ...parcelLayers]
         },
     });
 
@@ -107,7 +175,7 @@ async function loadMap() {
         if (e.features.length === 0) return;
 
         const feature = e.features[0];
-        
+
         // Clear previous selection
         if (selectedFeatureId !== null) {
             map.setFeatureState(
@@ -231,97 +299,6 @@ async function loadMap() {
 
     map.on('zoom', () => {
         zoomDisplay.textContent = `Zoom: ${Math.round(map.getZoom() * 10) / 10}`;
-    });
-
-    // Load county GeoJSON when map is ready
-    map.on('load', () => {
-        console.log('Map loaded successfully');
-        console.log('Loading county boundaries...');
-
-        // Load simplified boundaries (shown below zoom 11)
-        fetch('/api/counties?detail=simplified')
-            .then(response => response.json())
-            .then(data => {
-                map.addSource('counties-simplified', {
-                    type: 'geojson',
-                    data: data
-                });
-                
-                map.addLayer({
-                    id: 'county-fill-simplified',
-                    type: 'fill',
-                    source: 'counties-simplified',
-                    minzoom: 0,
-                    maxzoom: 9,
-                    paint: {
-                        'fill-color': '#88C0D0',
-                        'fill-opacity': 0.5
-                    }
-                });
-                
-                map.addLayer({
-                    id: 'county-outline-simplified',
-                    type: 'line',
-                    source: 'counties-simplified',
-                    minzoom: 0,
-                    maxzoom: 9,
-                    paint: {
-                        'line-color': '#007BFF',
-                        'line-width': 1
-                    }
-                });
-                
-                // Add county name labels
-                map.addLayer({
-                    id: 'county-labels',
-                    type: 'symbol',
-                    source: 'counties-simplified',
-                    maxzoom: 11,
-                    layout: {
-                        'text-field': ['get', 'name'],
-                        'text-size': 12,
-                        'text-font': ['Noto Sans Regular'],
-                        'text-anchor': 'center'
-                    },
-                    paint: {
-                        'text-color': '#333333',
-                        'text-halo-color': '#ffffff',
-                        'text-halo-width': 2
-                    }
-                });
-                
-                console.log('Simplified county boundaries loaded');
-            })
-            .catch(error => {
-                console.error('Error loading simplified counties:', error);
-            });
-        
-        // Load full boundaries (shown at zoom 11-15)
-        fetch('/api/counties?detail=full')
-            .then(response => response.json())
-            .then(data => {
-                map.addSource('counties-full', {
-                    type: 'geojson',
-                    data: data
-                });
-                
-                map.addLayer({
-                    id: 'county-outline-full',
-                    type: 'line',
-                    source: 'counties-full',
-                    minzoom: 9,
-                    maxzoom: 19,
-                    paint: {
-                        'line-color': '#007BFF',
-                        'line-width': 1
-                    }
-                });
-                
-                console.log('Full county boundaries loaded');
-            })
-            .catch(error => {
-                console.error('Error loading full counties:', error);
-            });
     });
 
     // Debug: Log errors (filter out tile parsing errors for empty tiles)

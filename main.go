@@ -22,6 +22,7 @@ func main() {
 
 	// Parse command-line flags
 	importParcels := flag.Bool("import-parcels", false, "Run parcel importer for specified county")
+	importTaxes := flag.Bool("import-taxes", false, "Run parcel tax importer for specified county")
 	county := flag.String("county", "", "County name to import parcels for")
 	resume := flag.Bool("resume", false, "Resume import from last checkpoint")
 	maxParcels := flag.Int("max-parcels", 0, "Maximum number of parcels to import (0 = no limit, for testing)")
@@ -106,6 +107,23 @@ func main() {
 		os.Exit(0)
 	}
 
+	if *importTaxes {
+		if *county == "" {
+			log.Fatal("Error: --county flag is required when using --import-parcels")
+		}
+		if err := importers.StartTaxImporter(db.DB, *county); err != nil {
+			log.Printf("ERROR: Parcel tax import failed: %v", err)
+			os.Exit(1)
+		}
+
+		os.Exit(0)
+	}
+
+	// Preload county boundary data
+	if err := handlers.LoadCountyBoundaries(db.DB); err != nil {
+		log.Fatalf("ERROR: Failed to load county boundaries: %v", err)
+	}
+
 	// Optional: Start the Georgia County importer to populate county boundaries
 	// Uncomment the lines below to import all 159 counties from SAGIS API (~2-3 minutes)
 	// Then comment back out to prevent re-importing on every restart
@@ -123,10 +141,14 @@ func main() {
 	// Enable CORS for all origins (adjust as needed for production)
 	router.Use(cors.Default())
 
-	// Enable GZIP compression for responses
+	// Exclude GZIP compression for pre-compressed endpoints and binary files
 	router.Use(gzip.Gzip(
 		gzip.DefaultCompression,
-		gzip.WithExcludedPaths([]string{"/georgia.pmtiles"}),
+		gzip.WithExcludedPaths([]string{
+			"/georgia.pmtiles",
+			"/api/counties/simplified",
+			"/api/counties/full",
+		}),
 	))
 
 	// Serve static files (index.html, app.js, etc.)
@@ -148,8 +170,9 @@ func main() {
 	// Register API routes
 	api := router.Group("/api")
 	{
-		// County boundary endpoint with zoom-aware detail switching
-		api.GET("/counties", handlers.GetCountyBoundaries)
+		// County boundary endpoints (preloaded at startup)
+		api.GET("/counties/simplified", handlers.GetSimplifiedCountyBoundaries)
+		api.GET("/counties/full", handlers.GetFullCountyBoundaries)
 
 		// Vector tile endpoint for pre-generated MVT tiles
 		api.GET("/tiles/:z/:x/:y", handlers.GetVectorTile)

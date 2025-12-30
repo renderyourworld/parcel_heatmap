@@ -25,7 +25,7 @@ type Parcel struct {
 	TaxDistrict    sql.NullString  `gorm:"type:varchar(10)"`
 
 	// Geometry
-	Geometry string `gorm:"type:geometry(MultiPolygon, 4326)"`
+	Geometry string `gorm:"type:geometry(MultiPolygon, 3857)"`
 
 	// Import Tracking
 	LastSync     sql.NullTime   `gorm:"type:timestamp"`

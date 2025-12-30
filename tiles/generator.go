@@ -1,8 +1,6 @@
 package tiles
 
 import (
-	"bytes"
-	"compress/gzip"
 	"context"
 	"fmt"
 	"log"
@@ -96,7 +94,7 @@ func GenerateTile(db *gorm.DB, z, x, y int, countyID uint16) ([]byte, error) {
 	}
 
 	// Gzip compress for storage
-	compressed, err := gzipCompress(mvtData)
+	compressed, err := utils.Gzip(mvtData)
 	if err != nil {
 		return nil, fmt.Errorf("failed to compress MVT: %w", err)
 	}
@@ -215,22 +213,6 @@ func GenerateTilesForCounty(db *gorm.DB, countyID uint16, countyName string, min
 	}
 
 	return nil
-}
-
-// gzipCompress compresses data using gzip compression
-func gzipCompress(data []byte) ([]byte, error) {
-	var buf bytes.Buffer
-	gz := gzip.NewWriter(&buf)
-
-	if _, err := gz.Write(data); err != nil {
-		return nil, err
-	}
-
-	if err := gz.Close(); err != nil {
-		return nil, err
-	}
-
-	return buf.Bytes(), nil
 }
 
 // generateTilesWithWorkers generates tiles using a worker pool and batches insertions
