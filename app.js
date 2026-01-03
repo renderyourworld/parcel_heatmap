@@ -23,6 +23,11 @@ async function loadMap() {
         fetch('/api/counties/full').then(r => r.json())
     ]);
 
+    // Ensure all county features have unique IDs for feature-state
+    fullCounties.features.forEach((f, i) => {
+        if (f.id === undefined || f.id === null) f.id = i;
+    });
+
     // Parcel Layers
     const parcelLayers = [
         {
@@ -33,7 +38,7 @@ async function loadMap() {
             minzoom: 13,
             paint: {
                 'fill-color': ['case', ['boolean', ['feature-state', 'selected'], false], '#ff6b6b', '#3388ff'],
-                'fill-opacity': ['case', ['boolean', ['feature-state', 'selected'], false], 0.6, 0.2]
+                'fill-opacity': ['case', ['boolean', ['feature-state', 'selected'], false], 0.6, 0.05]
             }
         },
         {
@@ -43,7 +48,12 @@ async function loadMap() {
             'source-layer': 'parcels',
             minzoom: 13,
             paint: {
-                'line-color': ['case', ['boolean', ['feature-state', 'selected'], false], '#ff0000', '#3388ff'],
+                'line-color': [
+                    'case',
+                    ['boolean', ['feature-state', 'selected'], false], '#ff0000',
+                    ['has', 'class_color'], ['get', 'class_color'],
+                    '#3388ff'
+                ],
                 'line-width': ['case', ['boolean', ['feature-state', 'selected'], false], 2, 1]
             }
         },
@@ -73,19 +83,10 @@ async function loadMap() {
         }
     ];
 
+    const focusCounties = ['Cobb', 'Forsyth', 'Fulton', 'DeKalb', 'Gwinnett', 'Cherokee'];
+
     // County Boundary Layers
     const countyLayers = [
-        {
-            id: 'county-fill-simplified',
-            type: 'fill',
-            source: 'counties-simplified',
-            minzoom: 0,
-            maxzoom: 9,
-            paint: {
-                'fill-color': '#88C0D0',
-                'fill-opacity': 0.5
-            }
-        },
         {
             id: 'county-outline-simplified',
             type: 'line',
@@ -98,31 +99,50 @@ async function loadMap() {
             }
         },
         {
-            id: 'county-labels',
-            type: 'symbol',
-            source: 'counties-simplified',
-            maxzoom: 11,
-            layout: {
-                'text-field': ['get', 'name'],
-                'text-size': 12,
-                'text-font': ['Noto Sans Regular'],
-                'text-anchor': 'center'
-            },
-            paint: {
-                'text-color': '#333333',
-                'text-halo-color': '#ffffff',
-                'text-halo-width': 2
-            }
-        },
-        {
             id: 'county-outline-full',
             type: 'line',
             source: 'counties-full',
             minzoom: 9,
             maxzoom: 19,
             paint: {
-                'line-color': '#007BFF',
-                'line-width': 1
+                'line-color': [
+                    'case',
+                    ['boolean', ['feature-state', 'selected'], false], '#ff0000',
+                    '#007BFF'
+                ],
+                'line-width': ['case', ['boolean', ['feature-state', 'selected'], false], 2, 1]
+            }
+        },
+        {
+            id: 'county-fill-full',
+            type: 'fill',
+            source: 'counties-full',
+            minzoom: 0,
+            maxzoom: 13,
+            filter: ['in', ['get', 'name'], ['literal', focusCounties]],
+            paint: {
+                'fill-color': '#88C0D0',
+                'fill-opacity': 0.4
+            }
+        },
+        {
+            id: 'county-labels',
+            type: 'symbol',
+            source: 'counties-simplified',
+            maxzoom: 13,
+            layout: {
+                'text-field': ['get', 'name'],
+                'text-size': 12,
+                'text-font': ['Noto Sans Regular'],
+                'text-anchor': 'center',
+                'text-letter-spacing': 0.05
+            },
+            paint: {
+                'text-color': [
+                    'case',
+                    ['in', ['get', 'name'], ['literal', focusCounties]], '#000000',
+                    '#333333'
+                ]
             }
         }
     ];
@@ -169,6 +189,7 @@ async function loadMap() {
 
     // Track selected parcel (using feature_id as unique identifier across all counties)
     let selectedFeatureId = null;
+    let selectedCountyId = null;
 
     // Click handler for parcels
     map.on('click', 'parcel-fill', (e) => {
@@ -204,7 +225,7 @@ async function loadMap() {
                     <tr><td style="padding: 3px 5px 3px 0; font-weight: bold;">Owner:</td><td style="padding: 3px 0;">${props.owner_name || 'N/A'}</td></tr>
                     <tr><td style="padding: 3px 5px 3px 0; font-weight: bold;">Owner Address:</td><td style="padding: 3px 0;">${props.owner_address || 'N/A'}</td></tr>
                     <tr><td style="padding: 3px 5px 3px 0; font-weight: bold;">Acres:</td><td style="padding: 3px 0;">${props.acres || 'N/A'}</td></tr>
-                    <tr><td style="padding: 3px 5px 3px 0; font-weight: bold;">Classification:</td><td style="padding: 3px 0;">${props.classification || 'N/A'}</td></tr>
+                    <tr><td style="padding: 3px 5px 3px 0; font-weight: bold;">Class:</td><td style="padding: 3px 0;">${props.category || 'N/A'} (${props.classification || 'N/A'})</td></tr>
                     <tr><td style="padding: 3px 5px 3px 0; font-weight: bold;">Tax District:</td><td style="padding: 3px 0;">${props.tax_district || 'N/A'}</td></tr>
                 </table>
             </div>
@@ -218,28 +239,27 @@ async function loadMap() {
     });
 
     // County click handlers
-    map.on('click', 'county-fill-simplified', (e) => {
-        if (e.features.length === 0) return;
-        const props = e.features[0].properties;
-        const popupHTML = `
-            <div style="font-family: sans-serif; max-width: 250px;">
-                <h3 style="margin: 0 0 10px 0; font-size: 14px; border-bottom: 2px solid #007BFF; padding-bottom: 5px;">
-                    ${props.name} County, ${props.state || 'GA'}
-                </h3>
-                <table style="width: 100%; font-size: 12px;">
-                    <tr><td style="padding: 3px 5px 3px 0; font-weight: bold;">Population:</td><td style="padding: 3px 0;">${formatNumber(props.population)}</td></tr>
-                    <tr><td style="padding: 3px 5px 3px 0; font-weight: bold;">Region:</td><td style="padding: 3px 0;">${props.region || 'N/A'}</td></tr>
-                    <tr><td style="padding: 3px 5px 3px 0; font-weight: bold;">Acres:</td><td style="padding: 3px 0;">${formatNumber(props.acres)}</td></tr>
-                    <tr><td style="padding: 3px 5px 3px 0; font-weight: bold;">Sq. Miles:</td><td style="padding: 3px 0;">${formatNumber(props.square_miles)}</td></tr>
-                </table>
-            </div>
-        `;
-        new maplibregl.Popup().setLngLat(e.lngLat).setHTML(popupHTML).addTo(map);
-    });
-
     map.on('click', 'county-fill-full', (e) => {
         if (e.features.length === 0) return;
-        const props = e.features[0].properties;
+
+        const feature = e.features[0];
+
+        // Clear previous selection
+        if (selectedCountyId !== null) {
+            map.setFeatureState(
+                { source: 'counties-full', id: selectedCountyId },
+                { selected: false }
+            );
+        }
+
+        // Set new selection
+        selectedCountyId = feature.id;
+        map.setFeatureState(
+            { source: 'counties-full', id: selectedCountyId },
+            { selected: true }
+        );
+
+        const props = feature.properties;
         const popupHTML = `
             <div style="font-family: sans-serif; max-width: 250px;">
                 <h3 style="margin: 0 0 10px 0; font-size: 14px; border-bottom: 2px solid #007BFF; padding-bottom: 5px;">
@@ -257,12 +277,6 @@ async function loadMap() {
     });
 
     // Change cursor on hover for counties
-    map.on('mouseenter', 'county-fill-simplified', () => {
-        map.getCanvas().style.cursor = 'pointer';
-    });
-    map.on('mouseleave', 'county-fill-simplified', () => {
-        map.getCanvas().style.cursor = '';
-    });
     map.on('mouseenter', 'county-fill-full', () => {
         map.getCanvas().style.cursor = 'pointer';
     });
@@ -281,19 +295,83 @@ async function loadMap() {
 
     // Clear selection when clicking map background
     map.on('click', (e) => {
-        const features = map.queryRenderedFeatures(e.point, { layers: ['parcel-fill'] });
-        if (features.length === 0 && selectedFeatureId !== null) {
+        // Handle parcel deselection
+        const parcelFeatures = map.queryRenderedFeatures(e.point, { layers: ['parcel-fill'] });
+        if (parcelFeatures.length === 0 && selectedFeatureId !== null) {
             map.setFeatureState(
                 { source: 'parcels', sourceLayer: 'parcels', id: selectedFeatureId },
                 { selected: false }
             );
             selectedFeatureId = null;
         }
+
+        // Handle county deselection
+        const countyFeatures = map.queryRenderedFeatures(e.point, { layers: ['county-fill-full'] });
+        if (countyFeatures.length === 0 && selectedCountyId !== null) {
+            map.setFeatureState(
+                { source: 'counties-full', id: selectedCountyId },
+                { selected: false }
+            );
+            selectedCountyId = null;
+        }
     });
+
+    // Add controls container
+    const controls = document.createElement('div');
+    controls.style.cssText = `
+        position: absolute; 
+        bottom: 20px; 
+        left: 10px; 
+        background: rgba(255, 255, 255, 0.85); 
+        backdrop-filter: blur(8px);
+        padding: 12px; 
+        border-radius: 12px; 
+        box-shadow: 0 4px 15px rgba(0,0,0,0.15); 
+        border: 1px solid rgba(255,255,255,0.4);
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; 
+        z-index: 1000; 
+        display: flex; 
+        flex-direction: column; 
+        gap: 10px;
+    `;
+    document.body.appendChild(controls);
+
+    // Add Tile Borders toggle
+    const borderToggleContainer = document.createElement('label');
+    borderToggleContainer.style.cssText = 'display: flex; align-items: center; gap: 10px; cursor: pointer; font-size: 14px; color: #1a1a1a; font-weight: 500;';
+
+    const borderCheckbox = document.createElement('input');
+    borderCheckbox.type = 'checkbox';
+    borderCheckbox.style.cssText = 'width: 16px; height: 16px; cursor: pointer; accent-color: #007BFF;';
+    borderCheckbox.addEventListener('change', (e) => {
+        map.showTileBoundaries = e.target.checked;
+    });
+
+    const borderText = document.createElement('span');
+    borderText.textContent = 'Show Tile Borders';
+
+    borderToggleContainer.appendChild(borderCheckbox);
+    borderToggleContainer.appendChild(borderText);
+    controls.appendChild(borderToggleContainer);
 
     // Add zoom level indicator
     const zoomDisplay = document.createElement('div');
-    zoomDisplay.style.cssText = 'position: absolute; bottom: 20px; right: 10px; background: rgba(255,255,255,0.9); padding: 8px 12px; border: 2px solid #333; border-radius: 4px; font-weight: bold; font-size: 14px; z-index: 1000;';
+    zoomDisplay.style.cssText = `
+        position: absolute; 
+        bottom: 20px; 
+        right: 10px; 
+        background: rgba(255, 255, 255, 0.85); 
+        backdrop-filter: blur(8px);
+        padding: 8px 16px; 
+        border-radius: 12px; 
+        box-shadow: 0 4px 15px rgba(0,0,0,0.15); 
+        border: 1px solid rgba(255,255,255,0.4);
+        font-weight: 600; 
+        font-size: 13px; 
+        color: #1a1a1a;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        z-index: 1000;
+    `;
     zoomDisplay.textContent = `Zoom: ${Math.round(map.getZoom() * 10) / 10}`;
     document.body.appendChild(zoomDisplay);
 
