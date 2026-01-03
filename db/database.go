@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/stdlib"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 )
 
 // Database connection instances
@@ -68,7 +69,9 @@ func Connect() *gorm.DB {
 	// Open GORM using the shared connection pool
 	db, err := gorm.Open(postgres.New(postgres.Config{
 		Conn: sqlDB, // Share the pgxpool connection
-	}), &gorm.Config{})
+	}), &gorm.Config{
+		Logger: logger.Default.LogMode(logger.Error), // Suppress multiple-value SLOW SQL logs
+	})
 	if err != nil {
 		log.Fatalf("Failed to connect to database via GORM: %v", err)
 	}
