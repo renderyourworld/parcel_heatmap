@@ -66,7 +66,6 @@ func GetVectorTile(c *gin.Context) {
 		SELECT data 
 		FROM tiles 
 		WHERE z = ? AND x = ? AND y = ? AND layer = 'parcels'
-		LIMIT 1
 	`, z, x, y).Row()
 
 	err = row.Scan(&tileData)

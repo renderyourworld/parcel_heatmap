@@ -55,32 +55,34 @@ func GenerateTile(db *gorm.DB, z, x, y int, countyID uint16) ([]byte, error) {
 		FROM (
 			SELECT 
 				ST_AsMVTGeom(
-					geometry,  -- Geometry is already in 3857
+					p.geometry,  -- Geometry is already in 3857
 					ST_TileEnvelope($1, $2, $3),   -- Tile bounds in native 3857
 					4096,  -- tile extent (standard)
-					$5,    -- buffer pixels (dynamic based on zoom)
+					$4,    -- buffer pixels (dynamic based on zoom)
 					true   -- clip geometry to tile bounds
 				) AS geom,
-				county_id || '_' || objectid AS feature_id,  -- Composite ID: unique across all counties
-				objectid,
-				parcel_id,
-				site_number,
-				site_address,
-				owner_name,
-				owner_address,
-				acres,
-				classification,
-				tax_district
-			FROM parcels
-			WHERE county_id = $4
-			  AND geometry && ST_TileEnvelope($1, $2, $3)  -- Bbox check: both in 3857
-			  AND processed IS NULL
+				p.county_id || '_' || p.objectid AS feature_id,  -- Composite ID: unique across all counties
+				p.objectid,
+				p.parcel_id,
+				p.site_number,
+				p.site_address,
+				p.owner_name,
+				p.owner_address,
+				p.acres,
+				p.classification,
+				cc.category,
+				cc.color AS class_color,
+				p.tax_district
+			FROM parcels p
+			LEFT JOIN parcel_class_codes cc ON p.county_id = cc.county_id AND p.classification = cc.code
+			WHERE p.geometry && ST_TileEnvelope($1, $2, $3)  -- Bbox check: both in 3857
+			  AND p.processed IS NULL
 		) AS tile
 		WHERE geom IS NOT NULL
 	`
 
 	var mvtData []byte
-	row := db.Raw(query, z, x, y, countyID, buffer).Row()
+	row := db.Raw(query, z, x, y, buffer).Row()
 	err := row.Scan(&mvtData)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate MVT for tile %d/%d/%d: %w", z, x, y, err)
@@ -148,48 +150,53 @@ func GenerateTilesForCounty(db *gorm.DB, countyID uint16, countyName string, min
 
 	log.Printf("County bounds: [%.4f, %.4f, %.4f, %.4f]", bounds.MinLon, bounds.MinLat, bounds.MaxLon, bounds.MaxLat)
 
-	// Calculate tile grid dynamically from county bounds
-	// Use PostGIS to find which tiles actually contain parcels
+	// Calculate tile grid using the county's actual geometry
+	// 1. Get bbox of county to determine min/max tiles
+	// 2. Filter specific tiles by intersection with county boundary
 	var tiles []TileCoord
 	for z := minZoom; z <= maxZoom; z++ {
-		// Calculate tile range from county bounds using Web Mercator math
-		// PostGIS provides tile coordinate functions based on 3857 coordinates
 		var zoomTiles []struct {
 			X int
 			Y int
 		}
 
-		// Query PostGIS to find unique tiles that contain parcels
-		// Uses ST_TileEnvelope in its native 3857, transforms to 4326 for bbox check
+		// Improved query: Use the county boundary geometry to find tiles
+		// This handles irregular shapes (like Fulton 'S' shape) efficiently
 		err = db.Raw(`
-			WITH bbox AS (
-				SELECT ST_Transform(ST_MakeEnvelope($1, $2, $3, $4, 4326), 3857) AS geom
+			WITH county AS (
+				SELECT boundary, ST_Transform(boundary, 3857) as boundary_3857, id FROM counties WHERE id = $1
 			),
 			tile_range AS (
+				-- Calculate min/max tile indices based on county bounding box in 3857
 				SELECT 
-					FLOOR((ST_XMin((SELECT geom FROM bbox)) + 20037508.34) / (20037508.34 * 2 / POW(2, $5::int)))::int AS min_x,
-					CEIL((ST_XMax((SELECT geom FROM bbox)) + 20037508.34) / (20037508.34 * 2 / POW(2, $5::int)))::int AS max_x,
-					FLOOR((20037508.34 - ST_YMax((SELECT geom FROM bbox))) / (20037508.34 * 2 / POW(2, $5::int)))::int AS min_y,
-					CEIL((20037508.34 - ST_YMin((SELECT geom FROM bbox))) / (20037508.34 * 2 / POW(2, $5::int)))::int AS max_y
+					FLOOR((ST_XMin(boundary_3857) + 20037508.34) / (20037508.34 * 2 / POW(2, $2::int)))::int AS min_x,
+					CEIL((ST_XMax(boundary_3857) + 20037508.34) / (20037508.34 * 2 / POW(2, $2::int)))::int AS max_x,
+					FLOOR((20037508.34 - ST_YMax(boundary_3857)) / (20037508.34 * 2 / POW(2, $2::int)))::int AS min_y,
+					CEIL((20037508.34 - ST_YMin(boundary_3857)) / (20037508.34 * 2 / POW(2, $2::int)))::int AS max_y
+				FROM county
 			)
 			SELECT DISTINCT x, y
 			FROM tile_range,
 			     generate_series(min_x, max_x) AS x,
 			     generate_series(min_y, max_y) AS y
-			WHERE EXISTS (
-				SELECT 1 FROM parcels
-				WHERE county_id = $6
-				  AND processed IS NULL
-				  AND geometry && ST_TileEnvelope($5::int, x::int, y::int)
-				LIMIT 1
-			)
-		`, bounds.MinLon, bounds.MinLat, bounds.MaxLon, bounds.MaxLat, z, countyID).Scan(&zoomTiles).Error
+			WHERE 
+				-- 1. Must intersect the actual county polygon (not just bbox)
+				ST_Intersects(ST_TileEnvelope($2::int, x::int, y::int), (SELECT boundary_3857 FROM county))
+				
+				-- 2. Must verify there are actually parcels to show (avoids empty tiles in lakes/parks)
+				AND EXISTS (
+					SELECT 1 FROM parcels
+					WHERE geometry && ST_TileEnvelope($2::int, x::int, y::int)
+					  AND processed IS NULL
+					LIMIT 1
+				)
+		`, countyID, z).Scan(&zoomTiles).Error
 
 		if err != nil {
 			return fmt.Errorf("failed to find tiles for zoom %d: %w", z, err)
 		}
 
-		log.Printf("Zoom %d: found %d tiles with parcels", z, len(zoomTiles))
+		log.Printf("Zoom %d: found %d tiles intersecting county geometry", z, len(zoomTiles))
 
 		for _, t := range zoomTiles {
 			tiles = append(tiles, TileCoord{Z: z, X: t.X, Y: t.Y})
@@ -284,8 +291,9 @@ func generateTilesWithWorkers(gormDB *gorm.DB, tiles []TileCoord, countyID uint1
 			batch.Queue(`
 				INSERT INTO tiles (z, x, y, county_id, layer, data, created_at)
 				VALUES ($1, $2, $3, $4, 'parcels', $5, NOW())
-				ON CONFLICT (z, x, y, county_id, layer) DO UPDATE SET
+				ON CONFLICT (z, x, y, layer) DO UPDATE SET
 				data = EXCLUDED.data,
+				county_id = EXCLUDED.county_id, -- Update the "owner" county metadata
 				created_at = NOW()
 			`, result.Z, result.X, result.Y, countyID, result.MVTData)
 
