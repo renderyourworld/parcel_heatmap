@@ -113,9 +113,9 @@ func main() {
 
 	if *importTaxes {
 		if *county == "" {
-			log.Fatal("Error: --county flag is required when using --import-parcels")
+			log.Fatal("Error: --county flag is required when using --import-taxes")
 		}
-		if err := importers.StartTaxImporter(db.DB, *county); err != nil {
+		if err := importers.StartTaxImporter(db.DB, *county, *resume, *maxParcels, *logPerf); err != nil {
 			log.Printf("ERROR: Parcel tax import failed: %v", err)
 			os.Exit(1)
 		}
