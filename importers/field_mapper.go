@@ -83,6 +83,28 @@ func applyTransform(value string, transform sql.NullString) string {
 		}
 	}
 
+	// Handle CONCAT - joins multiple fields with a space
+	if transformStr == "CONCAT()" || transformStr == "CONCAT" {
+		// Value comes in as pipe-separated if from multiple fields
+		parts := strings.Split(value, "|")
+		var nonEmpty []string
+		for _, p := range parts {
+			trimmed := strings.TrimSpace(p)
+			if trimmed != "" {
+				nonEmpty = append(nonEmpty, trimmed)
+			}
+		}
+		value = strings.Join(nonEmpty, " ")
+	}
+
+	// Handle EXTRACT_SITE_NUMBER - pulls the first part of an address (e.g., "4330" from "4330 COVERED BRIDGE RD")
+	if transformStr == "EXTRACT_SITE_NUMBER()" || transformStr == "EXTRACT_SITE_NUMBER" {
+		parts := strings.Fields(value)
+		if len(parts) > 0 {
+			value = parts[0]
+		}
+	}
+
 	return value
 }
 
@@ -143,7 +165,7 @@ func mapFeatureToParcel(properties map[string]interface{}, geometry models.Geome
 		}
 
 		// Convert to target type and assign to parcel field
-		assignFieldValue(parcel, mapping.TargetColumn, strValue, properties)
+		assignFieldValue(parcel, mapping.TargetColumn, strValue, mapping.SourceField)
 
 		// Track if parcel_id was successfully assigned
 		if mapping.TargetColumn == "parcel_id" {
@@ -178,7 +200,7 @@ func convertToString(rawValue interface{}) string {
 }
 
 // assignFieldValue assigns a value to the appropriate parcel field based on target column
-func assignFieldValue(parcel *models.Parcel, targetColumn string, strValue string, properties map[string]interface{}) {
+func assignFieldValue(parcel *models.Parcel, targetColumn, strValue, sourceField string) {
 	switch targetColumn {
 	case "parcel_id":
 		parcel.ParcelID = strValue
@@ -195,23 +217,20 @@ func assignFieldValue(parcel *models.Parcel, targetColumn string, strValue strin
 	case "owner_address":
 		parcel.OwnerAddress = sql.NullString{String: strValue, Valid: strValue != ""}
 	case "acres":
-		// Try to parse the mapped acres field
-		floatVal, err := strconv.ParseFloat(strValue, 64)
+		if val, err := strconv.ParseFloat(strValue, 64); err == nil {
+			var acres float64
 
-		// If mapped field is 0, empty, or invalid, calculate from SHAPE.area
-		if err != nil || floatVal == 0 {
-			if shapeArea, exists := properties["SHAPE.area"]; exists && shapeArea != nil {
-				if areaFloat, ok := shapeArea.(float64); ok && areaFloat > 0 {
-					// Convert square feet to acres (43560 sqft per acre)
-					floatVal = areaFloat / 43560.0
-				}
+			// If the source field starts with "shape", assume it's sq ft and convert to acres (43560 sqft per acre)
+			if strings.HasPrefix(strings.ToLower(sourceField), "shape") {
+				acres = val / 43560.0
+			} else {
+				// Otherwise assume it's already in acres
+				acres = val
 			}
-		}
 
-		if floatVal > 0 {
 			// Round to 2 decimal places
-			floatVal = float64(int(floatVal*100+0.5)) / 100
-			parcel.Acres = sql.NullFloat64{Float64: floatVal, Valid: true}
+			acres = float64(int(acres*100+0.5)) / 100
+			parcel.Acres = sql.NullFloat64{Float64: acres, Valid: true}
 		}
 	case "classification":
 		parcel.Classification = sql.NullString{String: strValue, Valid: strValue != ""}
