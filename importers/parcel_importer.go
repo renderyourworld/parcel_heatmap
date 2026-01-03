@@ -21,8 +21,8 @@ import (
 const (
 	// maxParcelRetries specifies how many times to retry a failed HTTP request
 	maxParcelRetries = 3
-	// batchSize is the number of parcels to fetch per API request
-	batchSize = 1000
+	// defaultBatchSize is the fallback number of parcels to fetch per API request
+	defaultBatchSize = 1000
 	// rateLimitDelay is the pause between API requests (3 seconds to be polite)
 	rateLimitDelay = 3 * time.Second
 )
@@ -65,7 +65,7 @@ func StartParcelImporter(gormDB *gorm.DB, countyName string, resume bool, maxPar
 	}
 
 	// Initialize or resume checkpoint
-	checkpoint, err := initializeCheckpoint(gormDB, countyName, resume)
+	checkpoint, err := initializeCheckpoint(gormDB, countyName, "parcel", resume)
 	if err != nil {
 		return err
 	}
@@ -87,6 +87,14 @@ func StartParcelImporter(gormDB *gorm.DB, countyName string, resume bool, maxPar
 		log.Printf("Total parcels in county: %d", totalCount)
 	}
 
+	// Use county-specific batch size if available, otherwise default to 1000
+	dynamicBatchSize := int(county.MaxRecordCount)
+	if dynamicBatchSize <= 0 {
+		dynamicBatchSize = defaultBatchSize
+	}
+
+	log.Printf("Starting parcel import for %s county (resume=%v, batchSize=%d)", countyName, resume, dynamicBatchSize)
+
 	// Process batches
 	successCount := 0
 	failCount := 0
@@ -100,7 +108,7 @@ func StartParcelImporter(gormDB *gorm.DB, countyName string, resume bool, maxPar
 		baseURL := county.GisApiUrl.String + "query"
 		params := url.Values{}
 		params.Set("where", fmt.Sprintf("%s > %d", objectIDField, currentOffset))
-		params.Set("resultRecordCount", fmt.Sprintf("%d", batchSize))
+		params.Set("resultRecordCount", fmt.Sprintf("%d", dynamicBatchSize))
 		params.Set("outFields", "*")
 		params.Set("returnGeometry", "true")
 		params.Set("outSR", "3857")
@@ -271,7 +279,7 @@ func StartParcelImporter(gormDB *gorm.DB, countyName string, resume bool, maxPar
 		failCount += batchFailCount
 		currentOffset = maxObjectIDInBatch
 
-		if err := updateCheckpoint(gormDB, countyName, maxObjectIDInBatch, successCount, failCount); err != nil {
+		if err := updateCheckpoint(gormDB, countyName, "parcel", maxObjectIDInBatch, successCount, failCount); err != nil {
 			log.Printf("Warning: Failed to update checkpoint: %v", err)
 		}
 
@@ -291,18 +299,18 @@ func StartParcelImporter(gormDB *gorm.DB, countyName string, resume bool, maxPar
 		}
 
 		// If we got less than batchSize, we're likely at the end
-		if len(featureCollection.Features) < batchSize {
+		if len(featureCollection.Features) < dynamicBatchSize {
 			log.Println("Received partial batch. Likely at end of dataset.")
 			break
 		}
 	}
 
 	// Mark import as complete
-	if err := completeCheckpoint(gormDB, countyName, successCount, failCount); err != nil {
+	if err := completeCheckpoint(gormDB, countyName, "parcel", successCount, failCount); err != nil {
 		log.Printf("Warning: Failed to mark checkpoint complete: %v", err)
 	}
 
-	log.Printf("Import complete! Total processed: %d, Failed: %d", successCount, failCount)
+	log.Printf("Parcel import complete! Total processed: %d, Failed: %d", successCount, failCount)
 
 	// Log final performance summary
 	perfLogger.LogFinal()
@@ -311,16 +319,17 @@ func StartParcelImporter(gormDB *gorm.DB, countyName string, resume bool, maxPar
 }
 
 // initializeCheckpoint creates or resumes a checkpoint record
-func initializeCheckpoint(db *gorm.DB, countyName string, resume bool) (*models.ImportCheckpoint, error) {
+func initializeCheckpoint(db *gorm.DB, countyName string, importType string, resume bool) (*models.ImportCheckpoint, error) {
 	var checkpoint models.ImportCheckpoint
 
-	err := db.Where("county_name = ?", countyName).First(&checkpoint).Error
+	err := db.Where("county_name = ? AND import_type = ?", countyName, importType).First(&checkpoint).Error
 
 	if err == gorm.ErrRecordNotFound {
 		// No checkpoint exists - create new one
 		now := time.Now()
 		checkpoint = models.ImportCheckpoint{
 			CountyName:      countyName,
+			ImportType:      importType,
 			LastProcessedID: 0,
 			Status:          "RUNNING",
 			StartTime:       &now,
@@ -330,7 +339,7 @@ func initializeCheckpoint(db *gorm.DB, countyName string, resume bool) (*models.
 		if err := db.Create(&checkpoint).Error; err != nil {
 			return nil, fmt.Errorf("failed to create checkpoint: %w", err)
 		}
-		log.Println("Created new checkpoint")
+		log.Printf("Created new %s checkpoint for %s", importType, countyName)
 		return &checkpoint, nil
 	} else if err != nil {
 		return nil, fmt.Errorf("failed to query checkpoint: %w", err)
@@ -338,7 +347,7 @@ func initializeCheckpoint(db *gorm.DB, countyName string, resume bool) (*models.
 
 	// Checkpoint exists
 	if !resume && checkpoint.Status == "COMPLETE" {
-		return nil, fmt.Errorf("import already completed for '%s'. Use --resume to retry failed parcels", countyName)
+		return nil, fmt.Errorf("%s import already completed for '%s'. Use --resume to retry failed records", importType, countyName)
 	}
 
 	if resume {
@@ -347,16 +356,16 @@ func initializeCheckpoint(db *gorm.DB, countyName string, resume bool) (*models.
 		if err := db.Save(&checkpoint).Error; err != nil {
 			return nil, fmt.Errorf("failed to update checkpoint: %w", err)
 		}
-		log.Printf("Resuming from checkpoint (last_processed_id=%d)", checkpoint.LastProcessedID)
+		log.Printf("Resuming %s import from checkpoint (last_processed_id=%d)", importType, checkpoint.LastProcessedID)
 	}
 
 	return &checkpoint, nil
 }
 
 // updateCheckpoint updates the checkpoint after processing a batch
-func updateCheckpoint(db *gorm.DB, countyName string, lastProcessedID int64, totalProcessed, totalFailed int) error {
+func updateCheckpoint(db *gorm.DB, countyName string, importType string, lastProcessedID int64, totalProcessed, totalFailed int) error {
 	return db.Model(&models.ImportCheckpoint{}).
-		Where("county_name = ?", countyName).
+		Where("county_name = ? AND import_type = ?", countyName, importType).
 		Updates(map[string]interface{}{
 			"last_processed_id": lastProcessedID,
 			"total_processed":   totalProcessed,
@@ -366,10 +375,10 @@ func updateCheckpoint(db *gorm.DB, countyName string, lastProcessedID int64, tot
 }
 
 // completeCheckpoint marks the import as complete
-func completeCheckpoint(db *gorm.DB, countyName string, totalProcessed, totalFailed int) error {
+func completeCheckpoint(db *gorm.DB, countyName string, importType string, totalProcessed, totalFailed int) error {
 	now := time.Now()
 	return db.Model(&models.ImportCheckpoint{}).
-		Where("county_name = ?", countyName).
+		Where("county_name = ? AND import_type = ?", countyName, importType).
 		Updates(map[string]interface{}{
 			"status":          "COMPLETE",
 			"end_time":        &now,

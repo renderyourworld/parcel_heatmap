@@ -19,8 +19,9 @@ type County struct {
 	SquareMiles sql.NullFloat64 `gorm:"type:numeric"`
 
 	// External API URLs for additional data sources
-	GisApiUrl sql.NullString `gorm:"type:text"`
-	TaxApiUrl sql.NullString `gorm:"type:text"`
+	GisApiUrl      sql.NullString `gorm:"type:text"`
+	TaxApiUrl      sql.NullString `gorm:"type:text"`
+	MaxRecordCount uint32         `gorm:"type:int;default:1000"`
 
 	// Geometry fields. PostGIS handles the spatial type
 	Boundary           string `gorm:"type:geometry(MultiPolygon, 4326);not null"`
