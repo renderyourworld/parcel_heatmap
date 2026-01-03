@@ -99,6 +99,7 @@ func StartParcelImporter(gormDB *gorm.DB, countyName string, resume bool, maxPar
 	successCount := 0
 	failCount := 0
 	currentOffset := checkpoint.LastProcessedID
+	useEsriJSON := false
 
 	for {
 		// Rate limiting
@@ -112,7 +113,13 @@ func StartParcelImporter(gormDB *gorm.DB, countyName string, resume bool, maxPar
 		params.Set("outFields", "*")
 		params.Set("returnGeometry", "true")
 		params.Set("outSR", "3857")
-		params.Set("f", "geoJson")
+
+		if useEsriJSON {
+			params.Set("f", "json")
+		} else {
+			params.Set("f", "geoJson")
+		}
+
 		params.Set("orderByFields", fmt.Sprintf("%s ASC", objectIDField))
 
 		queryURL := baseURL + "?" + params.Encode()
@@ -122,6 +129,7 @@ func StartParcelImporter(gormDB *gorm.DB, countyName string, resume bool, maxPar
 		// Fetch batch with retry logic
 		var featureCollection models.ParcelFeatureCollection
 		fetchSuccess := false
+		needBatchRetry := false
 
 		for attempt := 1; attempt <= maxParcelRetries; attempt++ {
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -181,6 +189,16 @@ func StartParcelImporter(gormDB *gorm.DB, countyName string, resume bool, maxPar
 				return fmt.Errorf("read failed after %d retries: %w", maxParcelRetries, readErr)
 			}
 
+			// Check for 400 Bad Request which usually indicates format not supported or invalid params
+			if resp.StatusCode == http.StatusBadRequest {
+				if !useEsriJSON {
+					log.Printf("Received 400 Bad Request with f=geoJson. Attempting to switch to f=json (Esri JSON)...")
+					useEsriJSON = true
+					needBatchRetry = true
+					break // Break fetch loop to restart batch loop
+				}
+			}
+
 			if resp.StatusCode != http.StatusOK {
 				log.Printf("Warning: API returned status %d (Attempt %d/%d)", resp.StatusCode, attempt, maxParcelRetries)
 				if attempt < maxParcelRetries {
@@ -194,6 +212,15 @@ func StartParcelImporter(gormDB *gorm.DB, countyName string, resume bool, maxPar
 			var errorCheck map[string]interface{}
 			if err := json.Unmarshal(bodyBytes, &errorCheck); err == nil {
 				if errorObj, hasError := errorCheck["error"]; hasError {
+					// Check if error implies we should try switching format
+					_, ok := errorObj.(map[string]interface{})
+					if ok && !useEsriJSON {
+						log.Printf("API Error with f=geoJson. Switching to f=json...")
+						useEsriJSON = true
+						needBatchRetry = true
+						break
+					}
+
 					log.Printf("Warning: API returned error: %v (Attempt %d/%d)", errorObj, attempt, maxParcelRetries)
 					if attempt < maxParcelRetries {
 						time.Sleep(time.Duration(attempt) * time.Second)
@@ -203,22 +230,54 @@ func StartParcelImporter(gormDB *gorm.DB, countyName string, resume bool, maxPar
 				}
 			}
 
-			// Unmarshal to FeatureCollection
-			if err := json.Unmarshal(bodyBytes, &featureCollection); err != nil {
-				log.Printf("Warning: JSON unmarshal error (Attempt %d/%d): %v", attempt, maxParcelRetries, err)
-				if attempt < maxParcelRetries {
-					time.Sleep(time.Duration(attempt) * time.Second)
-					continue
+			// Unmarshal logic based on format
+			if useEsriJSON {
+				var esriCollection models.EsriJSONFeatureCollection
+				if err := json.Unmarshal(bodyBytes, &esriCollection); err != nil {
+					log.Printf("Warning: Esri JSON unmarshal error (Attempt %d/%d): %v", attempt, maxParcelRetries, err)
+					if attempt < maxParcelRetries {
+						time.Sleep(time.Duration(attempt) * time.Second)
+						continue
+					}
+					return fmt.Errorf("esri unmarshal failed after %d retries: %w", maxParcelRetries, err)
 				}
-				return fmt.Errorf("unmarshal failed after %d retries: %w", maxParcelRetries, err)
+
+				// Convert Esri Collection to ParcelFeatureCollection
+				featureCollection = models.ParcelFeatureCollection{
+					Type:     "FeatureCollection",
+					Features: make([]models.ParcelFeature, len(esriCollection.Features)),
+				}
+
+				for i, ef := range esriCollection.Features {
+					featureCollection.Features[i] = models.ParcelFeature{
+						Type:       "Feature",
+						Properties: ef.Attributes,
+						Geometry:   ef.Geometry.ToGeoJSONGeometry(),
+					}
+				}
+
+			} else {
+				// Standard GeoJSON
+				if err := json.Unmarshal(bodyBytes, &featureCollection); err != nil {
+					log.Printf("Warning: JSON unmarshal error (Attempt %d/%d): %v", attempt, maxParcelRetries, err)
+					if attempt < maxParcelRetries {
+						time.Sleep(time.Duration(attempt) * time.Second)
+						continue
+					}
+					return fmt.Errorf("unmarshal failed after %d retries: %w", maxParcelRetries, err)
+				}
 			}
 
 			fetchSuccess = true
 			break
 		}
 
+		if needBatchRetry {
+			continue // Restart the main loop to rebuild URL with new params
+		}
+
 		if !fetchSuccess {
-			return fmt.Errorf("failed to fetch batch after %d attempts", maxRetries)
+			return fmt.Errorf("failed to fetch batch after %d attempts", maxParcelRetries)
 		}
 
 		// Check if we're done (no more features)
