@@ -22,7 +22,7 @@ type Parcel struct {
 	OwnerAddress   sql.NullString  `gorm:"type:text"`
 	Acres          sql.NullFloat64 `gorm:"type:numeric"` // Acres can be nullable/null
 	Classification sql.NullString  `gorm:"type:varchar(50)"`
-	TaxDistrict    sql.NullString  `gorm:"type:varchar(10)"`
+	TaxDistrict    sql.NullString  `gorm:"type:varchar(50)"`
 
 	// Geometry
 	Geometry string `gorm:"type:geometry(MultiPolygon, 3857)"`
