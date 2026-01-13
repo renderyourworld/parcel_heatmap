@@ -83,10 +83,6 @@ async function loadMap() {
         }
     ];
 
-    const countiesWithoutParcels = [
-        'Chattahoochee', 'Quitman', 'Randolph', 'Taliaferro', 'Wilcox'
-    ];
-
     // County Boundary Layers
     const countyLayers = [
         {
@@ -121,7 +117,6 @@ async function loadMap() {
             source: 'counties-full',
             minzoom: 0,
             maxzoom: 13,
-            filter: ['!', ['in', ['get', 'name'], ['literal', countiesWithoutParcels]]],
             paint: {
                 'fill-color': '#88C0D0',
                 'fill-opacity': 0.4
@@ -140,11 +135,7 @@ async function loadMap() {
                 'text-letter-spacing': 0.05
             },
             paint: {
-                'text-color': [
-                    'case',
-                    ['!', ['in', ['get', 'name'], ['literal', countiesWithoutParcels]]], '#000000',
-                    '#333333'
-                ]
+                'text-color': '#000000'
             }
         }
     ];
