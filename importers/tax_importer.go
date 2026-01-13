@@ -43,7 +43,7 @@ type WildfireTaxResponse struct {
 	} `json:"Records"`
 }
 
-func StartTaxImporter(gormDB *gorm.DB, countyName string, resume bool, maxParcels int, logPerf bool) error {
+func StartTaxImporter(gormDB *gorm.DB, countyName string, resume bool, maxParcels int, logging bool) error {
 	log.Printf("Starting parcel tax import for %s county (resume=%v)", countyName, resume)
 
 	// Look up county
@@ -65,7 +65,7 @@ func StartTaxImporter(gormDB *gorm.DB, countyName string, resume bool, maxParcel
 	}
 
 	// Initialize performance logger
-	perfLogger := utils.NewPerfLogger(logPerf)
+	perfLogger := utils.NewPerfLogger(logging)
 
 	// Fetch total parcel count for progress tracking
 	var totalParcels int64

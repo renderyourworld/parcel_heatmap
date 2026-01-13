@@ -83,7 +83,9 @@ async function loadMap() {
         }
     ];
 
-    const focusCounties = ['Cobb', 'Forsyth', 'Fulton', 'DeKalb', 'Gwinnett', 'Cherokee'];
+    const countiesWithoutParcels = [
+        'Chattahoochee', 'Quitman', 'Randolph', 'Taliaferro', 'Wilcox'
+    ];
 
     // County Boundary Layers
     const countyLayers = [
@@ -119,7 +121,7 @@ async function loadMap() {
             source: 'counties-full',
             minzoom: 0,
             maxzoom: 13,
-            filter: ['in', ['get', 'name'], ['literal', focusCounties]],
+            filter: ['!', ['in', ['get', 'name'], ['literal', countiesWithoutParcels]]],
             paint: {
                 'fill-color': '#88C0D0',
                 'fill-opacity': 0.4
@@ -140,7 +142,7 @@ async function loadMap() {
             paint: {
                 'text-color': [
                     'case',
-                    ['in', ['get', 'name'], ['literal', focusCounties]], '#000000',
+                    ['!', ['in', ['get', 'name'], ['literal', countiesWithoutParcels]]], '#000000',
                     '#333333'
                 ]
             }

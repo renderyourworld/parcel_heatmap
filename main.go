@@ -5,9 +5,12 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math/rand"
 	"mime"
 	"os"
+	"strings"
 	atomic "sync/atomic"
+	"time"
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-contrib/gzip"
@@ -18,6 +21,7 @@ import (
 	"github.com/renderyourworld/parcel_heatmap/importers"
 	"github.com/renderyourworld/parcel_heatmap/models"
 	"github.com/renderyourworld/parcel_heatmap/tiles"
+	"github.com/renderyourworld/parcel_heatmap/utils"
 )
 
 func main() {
@@ -36,7 +40,7 @@ func main() {
 	minZoom := flag.Int("min-zoom", 13, "Minimum zoom level for tile generation")
 	maxZoom := flag.Int("max-zoom", 19, "Maximum zoom level for tile generation")
 
-	logPerf := flag.Bool("logPerf", false, "Enable performance logging (time elapsed, transactions per second)")
+	logging := flag.Bool("log", false, "Enable logging to file in logs/ directory")
 
 	flag.Parse()
 
@@ -52,17 +56,45 @@ func main() {
 			log.Fatal("Error: --county flag is required when using --generate-tiles")
 		}
 
-		log.Printf("Generating tiles for %s county (zoom %d-%d)...", *county, *minZoom, *maxZoom)
-
-		// Look up county
-		var countyRecord models.County
-		if err := db.DB.Where("name = ?", *county).First(&countyRecord).Error; err != nil {
-			log.Fatalf("ERROR: County '%s' not found: %v", *county, err)
+		var targetCounties []models.County
+		if *county == "all" {
+			if err := db.DB.Order("name ASC").Find(&targetCounties).Error; err != nil {
+				log.Fatalf("ERROR: Failed to fetch all counties: %v", err)
+			}
+			log.Printf("Generating tiles for ALL %d counties...", len(targetCounties))
+		} else {
+			var countyRecord models.County
+			if err := db.DB.Where("name = ?", *county).First(&countyRecord).Error; err != nil {
+				log.Fatalf("ERROR: County '%s' not found: %v", *county, err)
+			}
+			targetCounties = append(targetCounties, countyRecord)
 		}
 
-		// Generate tiles
-		if err := tiles.GenerateTilesForCounty(db.DB, countyRecord.ID, *county, *minZoom, *maxZoom, *logPerf); err != nil {
-			log.Fatalf("ERROR: Tile generation failed: %v", err)
+		for _, c := range targetCounties {
+			// Set up file logging if enabled
+			var cleanup func()
+			if *logging {
+				var err error
+				cleanup, err = utils.SetupFileLogger(c.Name, "tiles")
+				if err != nil {
+					log.Printf("Warning: Failed to set up file logging for %s: %v", c.Name, err)
+				}
+			}
+
+			log.Printf("Generating tiles for %s county (zoom %d-%d)...", c.Name, *minZoom, *maxZoom)
+
+			// Generate tiles
+			if err := tiles.GenerateTilesForCounty(db.DB, c.ID, c.Name, *minZoom, *maxZoom, *logging); err != nil {
+				log.Printf("ERROR: Tile generation failed for %s: %v", c.Name, err)
+				// If generating for all, continue to next county. If for one, exit.
+				if *county != "all" {
+					os.Exit(1)
+				}
+			}
+
+			if cleanup != nil {
+				cleanup()
+			}
 		}
 
 		log.Println("Tile generation completed successfully!")
@@ -75,37 +107,81 @@ func main() {
 			log.Fatal("Error: --county flag is required when using --import-parcels")
 		}
 
-		if *maxParcels > 0 {
-			log.Printf("Starting parcel import for %s county (resume=%v, max=%d, skip-tiles=%v)", *county, *resume, *maxParcels, *skipTiles)
-		} else {
-			log.Printf("Starting parcel import for %s county (resume=%v, skip-tiles=%v)", *county, *resume, *skipTiles)
-		}
-
-		if err := importers.StartParcelImporter(db.DB, *county, *resume, *maxParcels, *logPerf); err != nil {
-			log.Printf("ERROR: Parcel import failed: %v", err)
-			os.Exit(1)
-		}
-
-		log.Println("Parcel import completed successfully!")
-
-		// Generate tiles after successful import (unless skipped)
-		if !*skipTiles {
-			log.Printf("Generating tiles for %s county (zoom %d-%d)...", *county, *minZoom, *maxZoom)
-
-			// Look up county ID
-			var countyRecord models.County
-			if err := db.DB.Where("name = ?", *county).First(&countyRecord).Error; err != nil {
-				log.Printf("ERROR: Failed to look up county for tile generation: %v", err)
-				os.Exit(1)
+		// Split counties by comma
+		counties := strings.Split(*county, ",")
+		for i, c := range counties {
+			c = strings.TrimSpace(c)
+			if c == "" {
+				continue
 			}
 
-			// Generate tiles
-			if err := tiles.GenerateTilesForCounty(db.DB, countyRecord.ID, *county, *minZoom, *maxZoom, *logPerf); err != nil {
-				log.Printf("ERROR: Tile generation failed: %v", err)
-				os.Exit(1)
+			// Set up file logging if enabled
+			var cleanup func()
+			if *logging {
+				var err error
+				cleanup, err = utils.SetupFileLogger(c, "parcels")
+				if err != nil {
+					log.Printf("Warning: Failed to set up file logging: %v", err)
+				}
 			}
 
-			log.Println("Tile generation completed successfully!")
+			if *maxParcels > 0 {
+				log.Printf("Starting parcel import for %s county (resume=%v, max=%d, skip-tiles=%v)", c, *resume, *maxParcels, *skipTiles)
+			} else {
+				log.Printf("Starting parcel import for %s county (resume=%v, skip-tiles=%v)", c, *resume, *skipTiles)
+			}
+
+			// Check for blocking errors (403 Forbidden / Cloudflare)
+			if err := importers.StartParcelImporter(db.DB, c, *resume, *maxParcels, *logging); err != nil {
+				log.Printf("ERROR: Parcel import failed for %s: %v", c, err)
+
+				errStr := strings.ToLower(err.Error())
+				if strings.Contains(errStr, "403") || strings.Contains(errStr, "forbidden") {
+					log.Println("🛑 BLOCKING DETECTED (VPN/Firewall challenge). Stopping import process.")
+					if cleanup != nil {
+						cleanup()
+					}
+					os.Exit(1)
+				}
+			} else {
+				log.Printf("Parcel import completed successfully for %s!", c)
+			}
+
+			// Generate tiles after successful import (unless skipped)
+			if !*skipTiles {
+				log.Printf("Generating tiles for %s county (zoom %d-%d)...", c, *minZoom, *maxZoom)
+
+				// Look up county ID
+				var countyRecord models.County
+				if err := db.DB.Where("name = ?", c).First(&countyRecord).Error; err != nil {
+					log.Printf("ERROR: Failed to look up county for tile generation: %v", err)
+				} else {
+					// Generate tiles
+					if err := tiles.GenerateTilesForCounty(db.DB, countyRecord.ID, c, *minZoom, *maxZoom, *logging); err != nil {
+						log.Printf("ERROR: Tile generation failed: %v", err)
+					} else {
+						log.Printf("Tile generation completed successfully for %s county!", c)
+					}
+				}
+			}
+
+			// Wait before processing the next county (if there is one)
+			if i < len(counties)-1 {
+				delayMin := 2 + rand.Intn(3)  // 2-4 minutes
+				delaySeconds := rand.Intn(60) // 0-59 seconds
+				totalDelay := time.Duration(delayMin)*time.Minute + time.Duration(delaySeconds)*time.Second
+
+				fmt.Printf("⏳ Waiting %v before next county...\n", totalDelay)
+				if cleanup != nil {
+					cleanup() // Close current log file before waiting
+				}
+				time.Sleep(totalDelay)
+			} else {
+				// Last iteration
+				if cleanup != nil {
+					cleanup()
+				}
+			}
 		}
 
 		os.Exit(0)
@@ -115,7 +191,18 @@ func main() {
 		if *county == "" {
 			log.Fatal("Error: --county flag is required when using --import-taxes")
 		}
-		if err := importers.StartTaxImporter(db.DB, *county, *resume, *maxParcels, *logPerf); err != nil {
+
+		// Set up file logging if enabled
+		if *logging {
+			cleanup, err := utils.SetupFileLogger(*county, "taxes")
+			if err != nil {
+				log.Printf("Warning: Failed to set up file logging: %v", err)
+			} else {
+				defer cleanup()
+			}
+		}
+
+		if err := importers.StartTaxImporter(db.DB, *county, *resume, *maxParcels, *logging); err != nil {
 			log.Printf("ERROR: Parcel tax import failed: %v", err)
 			os.Exit(1)
 		}
@@ -124,6 +211,16 @@ func main() {
 	}
 
 	if *importCounties {
+		// Set up file logging if enabled
+		if *logging {
+			cleanup, err := utils.SetupFileLogger("all", "counties")
+			if err != nil {
+				log.Printf("Warning: Failed to set up file logging: %v", err)
+			} else {
+				defer cleanup()
+			}
+		}
+
 		log.Println("Starting county boundary import from SAGIS API...")
 		if err := importers.StartCountyImporter(db.DB); err != nil {
 			log.Printf("County import completed with errors: %v", err)
