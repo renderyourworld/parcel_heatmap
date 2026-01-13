@@ -43,7 +43,7 @@ func GetVectorTile(c *gin.Context) {
 		return
 	}
 
-	// Validate zoom range (parcels are pre-generated for zoom 13-19)
+	// Validate zoom range
 	if z < 13 || z > 19 {
 		c.Status(http.StatusNoContent) // Return empty tile for out of range
 		return

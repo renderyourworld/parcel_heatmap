@@ -9,34 +9,50 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/renderyourworld/parcel_heatmap/db"
-	"github.com/renderyourworld/parcel_heatmap/models"
 	"github.com/renderyourworld/parcel_heatmap/utils"
 	"gorm.io/gorm"
 )
 
-// TileCoord represents a tile coordinate (Z/X/Y)
-type TileCoord struct {
-	Z int
-	X int
-	Y int
+// Represents a tile coordinate (Z/X/Y)
+type tileCoord struct {
+	z int
+	x int
+	y int
 }
 
-// TileResult holds the result of generating a single tile
-type TileResult struct {
-	Z       int
-	X       int
-	Y       int
-	MVTData []byte
-	Error   error
-	IsEmpty bool
+// Holds the result of generating a single tile
+type tileResult struct {
+	z       int
+	x       int
+	y       int
+	mvtData []byte
+	err     error
+	isEmpty bool
 }
 
-// GenerateTile creates an MVT tile for the given Z/X/Y coordinates using PostGIS ST_AsMVT
-// Returns gzipped MVT binary data ready for storage or serving
-func GenerateTile(db *gorm.DB, z, x, y int, countyID uint16) ([]byte, error) {
-	// MVT tiles are in EPSG:3857 (Web Mercator) coordinate space
-	// ST_AsMVTGeom expects geometry and tile bounds both in 3857
+// Sends a pgx.Batch to the database
+func flushBatch(ctx context.Context, batch *pgx.Batch, count int) error {
+	if count == 0 {
+		return nil
+	}
 
+	br := db.Pool.SendBatch(ctx, batch)
+	defer br.Close()
+
+	// Execute all queries in the batch
+	for i := 0; i < count; i++ {
+		_, err := br.Exec()
+		if err != nil {
+			return fmt.Errorf("batch exec failed on tile %d: %w", i, err)
+		}
+	}
+
+	return nil
+}
+
+// Creates an MVT (Mapbox Vector Tile) for the given Z/X/Y coordinates using PostGIS ST_AsMVT
+// Returns gzipped MVT binary data
+func generateTile(db *gorm.DB, z, x, y int) ([]byte, error) {
 	// Use progressively smaller buffer at higher zoom levels to reduce duplicate labels
 	// At higher zooms, parcels are larger on screen and need less buffer
 	buffer := 256
@@ -62,7 +78,6 @@ func GenerateTile(db *gorm.DB, z, x, y int, countyID uint16) ([]byte, error) {
 					true   -- clip geometry to tile bounds
 				) AS geom,
 				p.county_id || '_' || p.objectid AS feature_id,  -- Composite ID: unique across all counties
-				p.objectid,
 				p.parcel_id,
 				p.site_number,
 				p.site_address,
@@ -88,7 +103,6 @@ func GenerateTile(db *gorm.DB, z, x, y int, countyID uint16) ([]byte, error) {
 		return nil, fmt.Errorf("failed to generate MVT for tile %d/%d/%d: %w", z, x, y, err)
 	}
 
-	// Empty tile (no parcels in this area)
 	// ST_AsMVT returns a small empty MVT blob even when there are no features
 	// Reject tiles smaller than ~50 bytes as they're likely empty
 	if len(mvtData) == 0 || len(mvtData) < 50 {
@@ -104,137 +118,19 @@ func GenerateTile(db *gorm.DB, z, x, y int, countyID uint16) ([]byte, error) {
 	return compressed, nil
 }
 
-// GenerateTilesForCounty generates all tiles for a county at specified zoom levels
-// This is a long-running operation that pre-generates tiles
-// logPerf enables performance logging with time elapsed and transactions per second
-func GenerateTilesForCounty(db *gorm.DB, countyID uint16, countyName string, minZoom, maxZoom int, logPerf bool) error {
-	log.Printf("Starting tile generation for %s county (zoom %d-%d)...", countyName, minZoom, maxZoom)
-	log.Printf("County ID: %d", countyID)
-
-	// Initialize performance logger
-	perfLogger := utils.NewPerfLogger(logPerf)
-	if logPerf {
-		log.Println("Performance logging enabled")
-	}
-
-	// Get county bounds from database
-	var county models.County
-	if err := db.Select("id, name").Where("id = ?", countyID).First(&county).Error; err != nil {
-		return fmt.Errorf("county not found: %w", err)
-	}
-
-	// Check how many parcels exist for this county
-	var parcelCount int64
-	db.Model(&models.Parcel{}).Where("county_id = ?", countyID).Count(&parcelCount)
-	log.Printf("Found %d parcels for county_id=%d", parcelCount, countyID)
-
-	// Check how many successful parcels exist
-	var successCount int64
-	db.Model(&models.Parcel{}).Where("county_id = ? AND processed IS NULL", countyID).Count(&successCount)
-	log.Printf("Found %d successfully processed parcels", successCount)
-
-	// Query county bounding box
-	var bounds utils.BBox
-	err := db.Raw(`
-		SELECT 
-			ST_XMin(boundary) as min_lon,
-			ST_YMin(boundary) as min_lat,
-			ST_XMax(boundary) as max_lon,
-			ST_YMax(boundary) as max_lat
-		FROM counties WHERE id = ?
-	`, countyID).Scan(&bounds).Error
-
-	if err != nil {
-		return fmt.Errorf("failed to get county bounds: %w", err)
-	}
-
-	log.Printf("County bounds: [%.4f, %.4f, %.4f, %.4f]", bounds.MinLon, bounds.MinLat, bounds.MaxLon, bounds.MaxLat)
-
-	// Calculate tile grid using the county's actual geometry
-	// 1. Get bbox of county to determine min/max tiles
-	// 2. Filter specific tiles by intersection with county boundary
-	var tiles []TileCoord
-	for z := minZoom; z <= maxZoom; z++ {
-		var zoomTiles []struct {
-			X int
-			Y int
-		}
-
-		// Improved query: Use the county boundary geometry to find tiles
-		// This handles irregular shapes (like Fulton 'S' shape) efficiently
-		err = db.Raw(`
-			WITH county AS (
-				SELECT boundary, ST_Transform(boundary, 3857) as boundary_3857, id FROM counties WHERE id = $1
-			),
-			tile_range AS (
-				-- Calculate min/max tile indices based on county bounding box in 3857
-				SELECT 
-					FLOOR((ST_XMin(boundary_3857) + 20037508.34) / (20037508.34 * 2 / POW(2, $2::int)))::int AS min_x,
-					CEIL((ST_XMax(boundary_3857) + 20037508.34) / (20037508.34 * 2 / POW(2, $2::int)))::int AS max_x,
-					FLOOR((20037508.34 - ST_YMax(boundary_3857)) / (20037508.34 * 2 / POW(2, $2::int)))::int AS min_y,
-					CEIL((20037508.34 - ST_YMin(boundary_3857)) / (20037508.34 * 2 / POW(2, $2::int)))::int AS max_y
-				FROM county
-			)
-			SELECT DISTINCT x, y
-			FROM tile_range,
-			     generate_series(min_x, max_x) AS x,
-			     generate_series(min_y, max_y) AS y
-			WHERE 
-				-- 1. Must intersect the actual county polygon (not just bbox)
-				ST_Intersects(ST_TileEnvelope($2::int, x::int, y::int), (SELECT boundary_3857 FROM county))
-				
-				-- 2. Must verify there are actually parcels to show (avoids empty tiles in lakes/parks)
-				AND EXISTS (
-					SELECT 1 FROM parcels
-					WHERE geometry && ST_TileEnvelope($2::int, x::int, y::int)
-					  AND processed IS NULL
-					LIMIT 1
-				)
-		`, countyID, z).Scan(&zoomTiles).Error
-
-		if err != nil {
-			return fmt.Errorf("failed to find tiles for zoom %d: %w", z, err)
-		}
-
-		log.Printf("Zoom %d: found %d tiles intersecting county geometry", z, len(zoomTiles))
-
-		for _, t := range zoomTiles {
-			tiles = append(tiles, TileCoord{Z: z, X: t.X, Y: t.Y})
-		}
-	}
-
-	totalTiles := len(tiles)
-	log.Printf("Generating %d tiles (zoom %d-%d)...", totalTiles, minZoom, maxZoom)
-	log.Printf("Starting tile generation with 8 workers and batch size 50...")
-
-	// Generate tiles with worker pool and batching
-	storedCount, emptyCount, errorCount := generateTilesWithWorkers(db, tiles, countyID, perfLogger)
-
-	log.Printf("Tile generation complete: %d tiles stored, %d empty, %d errors", storedCount, emptyCount, errorCount)
-
-	// Log final performance summary
-	perfLogger.LogFinal()
-
-	if errorCount > 0 {
-		return fmt.Errorf("tile generation completed with %d errors", errorCount)
-	}
-
-	return nil
-}
-
-// generateTilesWithWorkers generates tiles using a worker pool and batches insertions
-func generateTilesWithWorkers(gormDB *gorm.DB, tiles []TileCoord, countyID uint16, perfLogger *utils.PerfLogger) (storedCount, emptyCount, errorCount int) {
+// Generates tiles using a worker pool and batches insertions
+func generateTilesWithWorkers(gormDB *gorm.DB, tiles []tileCoord, perfLogger *utils.PerfLogger) (storedCount, emptyCount, errorCount int) {
 	const numWorkers = 8
 	const batchSize = 50
 
 	totalTiles := len(tiles)
-	tileChan := make(chan TileCoord, numWorkers*2)    // Buffered channel for tile coordinates
-	resultChan := make(chan TileResult, numWorkers*2) // Buffered channel for results
+	tileChan := make(chan tileCoord, numWorkers*2)
+	resultChan := make(chan tileResult, numWorkers*2)
 
 	// WaitGroup for workers
 	var wg sync.WaitGroup
 
-	// Start worker pool (8 workers)
+	// Start worker pool
 	for w := 1; w <= numWorkers; w++ {
 		wg.Add(1)
 		go func(workerID int) {
@@ -242,15 +138,15 @@ func generateTilesWithWorkers(gormDB *gorm.DB, tiles []TileCoord, countyID uint1
 
 			for tile := range tileChan {
 				// Generate MVT tile
-				mvtData, err := GenerateTile(gormDB, tile.Z, tile.X, tile.Y, countyID)
+				mvtData, err := generateTile(gormDB, tile.z, tile.x, tile.y)
 
-				result := TileResult{
-					Z:       tile.Z,
-					X:       tile.X,
-					Y:       tile.Y,
-					MVTData: mvtData,
-					Error:   err,
-					IsEmpty: mvtData == nil,
+				result := tileResult{
+					z:       tile.z,
+					x:       tile.x,
+					y:       tile.y,
+					mvtData: mvtData,
+					err:     err,
+					isEmpty: mvtData == nil,
 				}
 
 				resultChan <- result
@@ -281,25 +177,24 @@ func generateTilesWithWorkers(gormDB *gorm.DB, tiles []TileCoord, countyID uint1
 	for result := range resultChan {
 		processedCount++
 
-		if result.Error != nil {
-			log.Printf("ERROR: Failed to generate tile %d/%d/%d: %v", result.Z, result.X, result.Y, result.Error)
+		if result.err != nil {
+			log.Printf("ERROR: Failed to generate tile %d/%d/%d: %v", result.z, result.x, result.y, result.err)
 			errorCount++
-		} else if result.IsEmpty {
+		} else if result.isEmpty {
 			emptyCount++
 		} else {
 			// Queue tile for batch insertion
 			batch.Queue(`
-				INSERT INTO tiles (z, x, y, county_id, layer, data, created_at)
-				VALUES ($1, $2, $3, $4, 'parcels', $5, NOW())
+				INSERT INTO tiles (z, x, y, layer, data, created_at)
+				VALUES ($1, $2, $3, 'parcels', $4, NOW())
 				ON CONFLICT (z, x, y, layer) DO UPDATE SET
 				data = EXCLUDED.data,
-				county_id = EXCLUDED.county_id, -- Update the "owner" county metadata
 				created_at = NOW()
-			`, result.Z, result.X, result.Y, countyID, result.MVTData)
+			`, result.z, result.x, result.y, result.mvtData)
 
 			batchCount++
 
-			// Flush batch when it reaches size 50 or we've processed all tiles
+			// Flush batch when it reaches size the batch size or we've processed all tiles
 			if batchCount >= batchSize || processedCount == totalTiles {
 				err := flushBatch(ctx, batch, batchCount)
 				if err != nil {
@@ -340,21 +235,80 @@ func generateTilesWithWorkers(gormDB *gorm.DB, tiles []TileCoord, countyID uint1
 	return storedCount, emptyCount, errorCount
 }
 
-// flushBatch sends a pgx.Batch to the database
-func flushBatch(ctx context.Context, batch *pgx.Batch, count int) error {
-	if count == 0 {
-		return nil
+// Generates all tiles for a county at specified zoom levels
+func GenerateTilesForCounty(db *gorm.DB, countyID uint16, countyName string, minZoom, maxZoom int, logging bool) error {
+	log.Printf("Starting tile generation for %s county (zoom %d-%d)...", countyName, minZoom, maxZoom)
+
+	// Initialize performance logger
+	perfLogger := utils.NewPerfLogger(logging)
+	if logging {
+		log.Println("Performance logging enabled")
 	}
 
-	br := db.Pool.SendBatch(ctx, batch)
-	defer br.Close()
-
-	// Execute all queries in the batch
-	for i := 0; i < count; i++ {
-		_, err := br.Exec()
-		if err != nil {
-			return fmt.Errorf("batch exec failed on tile %d: %w", i, err)
+	// Calculate tile grid using the county's actual geometry
+	var tiles []tileCoord
+	for z := minZoom; z <= maxZoom; z++ {
+		var zoomTiles []struct {
+			X int
+			Y int
 		}
+
+		// Use the county boundary geometry to find tiles
+		// This handles irregular shapes (like Fulton county's 'S' shape) efficiently
+		if err := db.Raw(`
+			WITH county AS (
+				SELECT boundary, ST_Transform(boundary, 3857) as boundary_3857, id FROM counties WHERE id = $1
+			),
+			tile_range AS (
+				-- Calculate min/max tile indices based on county bounding box in 3857
+				-- Web Mercator world is a perfect square that goes from -20,037,508.34 to +20,037,508.34 meters in both directions
+				SELECT 
+					FLOOR((ST_XMin(boundary_3857) + 20037508.34) / (20037508.34 * 2 / POW(2, $2::int)))::int AS min_x,
+					CEIL((ST_XMax(boundary_3857) + 20037508.34) / (20037508.34 * 2 / POW(2, $2::int)))::int AS max_x,
+					FLOOR((20037508.34 - ST_YMax(boundary_3857)) / (20037508.34 * 2 / POW(2, $2::int)))::int AS min_y,
+					CEIL((20037508.34 - ST_YMin(boundary_3857)) / (20037508.34 * 2 / POW(2, $2::int)))::int AS max_y
+				FROM county
+			)
+			SELECT DISTINCT x, y
+			FROM tile_range,
+			     generate_series(min_x, max_x) AS x,
+			     generate_series(min_y, max_y) AS y
+			WHERE 
+				-- Must intersect the actual county polygon (not just bbox)
+				ST_Intersects(ST_TileEnvelope($2::int, x::int, y::int), (SELECT boundary_3857 FROM county))
+				
+				-- Must verify there are actually parcels to show (avoids empty tiles in lakes/parks)
+				AND EXISTS (
+					SELECT 1 FROM parcels
+					WHERE geometry && ST_TileEnvelope($2::int, x::int, y::int)
+					  AND processed IS NULL
+					LIMIT 1
+				)
+		`, countyID, z).Scan(&zoomTiles).Error; err != nil {
+			return fmt.Errorf("failed to find tiles for zoom %d: %w", z, err)
+		}
+
+		log.Printf("Zoom %d: found %d tiles intersecting county geometry", z, len(zoomTiles))
+
+		for _, t := range zoomTiles {
+			tiles = append(tiles, tileCoord{z: z, x: t.X, y: t.Y})
+		}
+	}
+
+	totalTiles := len(tiles)
+	log.Printf("Generating %d tiles (zoom %d-%d)...", totalTiles, minZoom, maxZoom)
+	log.Printf("Starting tile generation with 8 workers and batch size 50...")
+
+	// Generate tiles with worker pool and batching
+	storedCount, emptyCount, errorCount := generateTilesWithWorkers(db, tiles, perfLogger)
+
+	log.Printf("Tile generation complete: %d tiles stored, %d empty, %d errors", storedCount, emptyCount, errorCount)
+
+	// Log final performance summary
+	perfLogger.LogFinal()
+
+	if errorCount > 0 {
+		return fmt.Errorf("tile generation completed with %d errors", errorCount)
 	}
 
 	return nil

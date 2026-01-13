@@ -21,8 +21,8 @@ type Parcel struct {
 	OwnerName      sql.NullString  `gorm:"type:text"`
 	OwnerAddress   sql.NullString  `gorm:"type:text"`
 	Acres          sql.NullFloat64 `gorm:"type:numeric"` // Acres can be nullable/null
-	Classification sql.NullString  `gorm:"type:varchar(50)"`
-	TaxDistrict    sql.NullString  `gorm:"type:varchar(50)"`
+	Classification sql.NullString  `gorm:"type:varchar(255)"`
+	TaxDistrict    sql.NullString  `gorm:"type:varchar(255)"`
 
 	// Geometry
 	Geometry string `gorm:"type:geometry(MultiPolygon, 3857)"`
@@ -33,6 +33,9 @@ type Parcel struct {
 	ErrorMessage sql.NullString `gorm:"type:text"`
 	CreatedAt    time.Time      `gorm:"type:timestamp;default:CURRENT_TIMESTAMP"`
 	UpdatedAt    time.Time      `gorm:"type:timestamp;default:CURRENT_TIMESTAMP"`
+
+	// Non-persisted flags (used during import, not stored in DB)
+	CalcAcresFromGeometry bool `gorm:"-"` // If true, calculate acres from geometry in INSERT
 }
 
 func (Parcel) TableName() string {

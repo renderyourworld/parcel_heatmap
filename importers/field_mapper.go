@@ -11,23 +11,7 @@ import (
 	"gorm.io/gorm"
 )
 
-// loadFieldMappings retrieves field mappings for a county from the database
-// Returns error if no mappings are found (indicates county not configured)
-func loadFieldMappings(db *gorm.DB, countyID uint16) ([]models.CountyFieldMapping, error) {
-	var mappings []models.CountyFieldMapping
-
-	if err := db.Where("county_id = ?", countyID).Find(&mappings).Error; err != nil {
-		return nil, fmt.Errorf("error loading field mappings: %w", err)
-	}
-
-	if len(mappings) == 0 {
-		return nil, fmt.Errorf("no field mappings found for county_id %d - county not configured", countyID)
-	}
-
-	return mappings, nil
-}
-
-// applyTransform applies simple string transformations based on transform column
+// Applies simple string transformations based on transform column
 func applyTransform(value string, transform sql.NullString) string {
 	if !transform.Valid || transform.String == "" {
 		return value
@@ -105,11 +89,85 @@ func applyTransform(value string, transform sql.NullString) string {
 		}
 	}
 
+	// CALC_FROM_GEOMETRY is handled specially in mapFeatureToParcel, not here.
+	// When source_field="$GEOMETRY" and transform="CALC_FROM_GEOMETRY",
+	// the acres will be calculated from the parcel geometry via PostGIS in the INSERT.
+
 	return value
 }
 
-// mapFeatureToParcel transforms a GeoJSON feature into a Parcel model using field mappings
-// Returns the parcel and an error string (empty if successful)
+// Assigns a value to the appropriate parcel field based on target column
+func assignFieldValue(parcel *models.Parcel, targetColumn, strValue, sourceField string) {
+	switch targetColumn {
+	case "parcel_id":
+		parcel.ParcelID = strValue
+	case "objectid":
+		if intVal, err := strconv.ParseInt(strValue, 10, 64); err == nil {
+			parcel.ObjectID = sql.NullInt64{Int64: intVal, Valid: true}
+		}
+	case "site_address":
+		parcel.SiteAddress = sql.NullString{String: strValue, Valid: strValue != ""}
+	case "site_number":
+		parcel.SiteNumber = sql.NullString{String: strValue, Valid: strValue != ""}
+	case "owner_name":
+		parcel.OwnerName = sql.NullString{String: strValue, Valid: strValue != ""}
+	case "owner_address":
+		parcel.OwnerAddress = sql.NullString{String: strValue, Valid: strValue != ""}
+	case "acres":
+		if val, err := strconv.ParseFloat(strValue, 64); err == nil {
+			var acres float64
+
+			// If the source field starts with "shape", assume it's sq ft and convert to acres (43560 sqft per acre)
+			if strings.HasPrefix(strings.ToLower(sourceField), "shape") {
+				acres = val / 43560.0
+			} else {
+				// Otherwise assume it's already in acres
+				acres = val
+			}
+
+			// Round to 2 decimal places
+			acres = float64(int(acres*100+0.5)) / 100
+			parcel.Acres = sql.NullFloat64{Float64: acres, Valid: true}
+		}
+	case "classification":
+		parcel.Classification = sql.NullString{String: strValue, Valid: strValue != ""}
+	case "tax_district":
+		parcel.TaxDistrict = sql.NullString{String: strValue, Valid: strValue != ""}
+	}
+}
+
+// Converts an interface{} value to string representation
+func convertToString(rawValue interface{}) string {
+	switch v := rawValue.(type) {
+	case string:
+		return v
+	case float64:
+		return strconv.FormatFloat(v, 'f', -1, 64)
+	case int:
+		return strconv.Itoa(v)
+	case bool:
+		return strconv.FormatBool(v)
+	default:
+		return fmt.Sprintf("%v", v)
+	}
+}
+
+// Retrieves field mappings for a county from the database
+func loadFieldMappings(db *gorm.DB, countyID uint16) ([]models.CountyFieldMapping, error) {
+	var mappings []models.CountyFieldMapping
+
+	if err := db.Where("county_id = ?", countyID).Find(&mappings).Error; err != nil {
+		return nil, fmt.Errorf("error loading field mappings: %w", err)
+	}
+
+	if len(mappings) == 0 {
+		return nil, fmt.Errorf("no field mappings found for county_id %d - county not configured", countyID)
+	}
+
+	return mappings, nil
+}
+
+// Transforms a GeoJSON feature into a Parcel model using field mappings
 func mapFeatureToParcel(properties map[string]interface{}, geometry models.Geometry, mappings []models.CountyFieldMapping, countyID uint16) (*models.Parcel, string) {
 	parcel := &models.Parcel{
 		CountyID: countyID,
@@ -128,6 +186,18 @@ func mapFeatureToParcel(properties map[string]interface{}, geometry models.Geome
 
 	// Iterate through field mappings and extract values
 	for _, mapping := range mappings {
+		// Handle special $GEOMETRY source field for calculating values from geometry
+		if mapping.SourceField == "$GEOMETRY" {
+			if mapping.Transform.Valid && mapping.Transform.String == "CALC_FROM_GEOMETRY" {
+				// Mark that acres should be calculated from geometry in PostgreSQL
+				// We leave parcel.Acres as NULL; insertParcel will use COALESCE with ST_Area
+				if mapping.TargetColumn == "acres" {
+					parcel.CalcAcresFromGeometry = true
+				}
+			}
+			continue
+		}
+
 		// Handle multi-field source (comma-separated fields for complex mappings)
 		sourceFields := strings.Split(mapping.SourceField, ",")
 		var strValue string
@@ -181,60 +251,4 @@ func mapFeatureToParcel(properties map[string]interface{}, geometry models.Geome
 
 	// Leave processed as NULL (zero value) = success
 	return parcel, ""
-}
-
-// convertToString converts an interface{} value to string representation
-func convertToString(rawValue interface{}) string {
-	switch v := rawValue.(type) {
-	case string:
-		return v
-	case float64:
-		return strconv.FormatFloat(v, 'f', -1, 64)
-	case int:
-		return strconv.Itoa(v)
-	case bool:
-		return strconv.FormatBool(v)
-	default:
-		return fmt.Sprintf("%v", v)
-	}
-}
-
-// assignFieldValue assigns a value to the appropriate parcel field based on target column
-func assignFieldValue(parcel *models.Parcel, targetColumn, strValue, sourceField string) {
-	switch targetColumn {
-	case "parcel_id":
-		parcel.ParcelID = strValue
-	case "objectid":
-		if intVal, err := strconv.ParseInt(strValue, 10, 64); err == nil {
-			parcel.ObjectID = sql.NullInt64{Int64: intVal, Valid: true}
-		}
-	case "site_address":
-		parcel.SiteAddress = sql.NullString{String: strValue, Valid: strValue != ""}
-	case "site_number":
-		parcel.SiteNumber = sql.NullString{String: strValue, Valid: strValue != ""}
-	case "owner_name":
-		parcel.OwnerName = sql.NullString{String: strValue, Valid: strValue != ""}
-	case "owner_address":
-		parcel.OwnerAddress = sql.NullString{String: strValue, Valid: strValue != ""}
-	case "acres":
-		if val, err := strconv.ParseFloat(strValue, 64); err == nil {
-			var acres float64
-
-			// If the source field starts with "shape", assume it's sq ft and convert to acres (43560 sqft per acre)
-			if strings.HasPrefix(strings.ToLower(sourceField), "shape") {
-				acres = val / 43560.0
-			} else {
-				// Otherwise assume it's already in acres
-				acres = val
-			}
-
-			// Round to 2 decimal places
-			acres = float64(int(acres*100+0.5)) / 100
-			parcel.Acres = sql.NullFloat64{Float64: acres, Valid: true}
-		}
-	case "classification":
-		parcel.Classification = sql.NullString{String: strValue, Valid: strValue != ""}
-	case "tax_district":
-		parcel.TaxDistrict = sql.NullString{String: strValue, Valid: strValue != ""}
-	}
 }
