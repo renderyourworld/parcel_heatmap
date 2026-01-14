@@ -25,7 +25,7 @@ Every county in Georgia is fully mapped with parcel-level detail including prope
 
 | State View | County Parcels | Parcel Details |
 |:----------:|:--------------:|:--------------:|
-| ![Georgia Overview](docs/screenshots/state-view.png) | ![County Parcels](docs/screenshots/county-parcels.png) | ![Parcel Popup](docs/screenshots/parcel-details.png) |
+| ![Georgia Overview](docs/screenshots/state-view.jpg) | ![County Parcels](docs/screenshots/county-parcels.jpg) | ![Parcel Popup](docs/screenshots/parcel-details.jpg) |
 | *All 159 counties* | *Individual parcels visible at zoom 13+* | *Property info on click* |
 
 ---
