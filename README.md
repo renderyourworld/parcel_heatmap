@@ -5,6 +5,9 @@
 **Interactive map visualization for Georgia's 4.77 million property parcels across all 159 counties**
 
 [![Live Demo](https://img.shields.io/badge/demo-parcels.renderyourworld.com-blue)](https://parcels.renderyourworld.com)
+![Go](https://img.shields.io/badge/go-%2300ADD8.svg?style=for-the-badge&logo=go&logoColor=white)
+![Postgres](https://img.shields.io/badge/postgres-%23316192.svg?style=for-the-badge&logo=postgresql&logoColor=white)
+![MapLibre](https://img.shields.io/badge/MapLibre-152238?style=for-the-badge&logo=maplibre&logoColor=white)
 
 <img src="docs/screenshots/state-view.jpg" alt="Georgia Parcel Map" width="600">
 
