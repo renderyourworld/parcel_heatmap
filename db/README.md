@@ -19,16 +19,16 @@ The database uses PostgreSQL 15+ with the PostGIS extension for spatial data ope
 
 ```mermaid
 erDiagram
-    counties ||--o{ parcels : "has many"
-    counties ||--o{ parcel_taxes : "has many"
-    counties ||--o{ county_field_mappings : "has many"
-    counties ||--o{ parcel_class_codes : "has many"
-    parcels ||--o{ parcel_taxes : "has many"
+    counties ||--o{ parcels : "id <- county_id"
+    counties ||--o{ parcel_taxes : "id <- county_id"
+    counties ||--o{ county_field_mappings : "id <- county_id"
+    counties ||--o{ parcel_class_codes : "id <- county_id"
+    parcels ||--o{ parcel_taxes : "id <- parcel_id"
 
     counties {
         smallint id PK
-        varchar name UK
-        varchar state
+        varchar(50) name UK
+        varchar(2) state
         geometry boundary "MultiPolygon 4326"
         geometry boundary_simplified "MultiPolygon 4326"
         geometry centroid "Point 4326"
@@ -36,7 +36,7 @@ erDiagram
         jsonb boundary_geojson "Precomputed"
         jsonb boundary_simplified_geojson "Precomputed"
         bigint population
-        varchar region
+        varchar(50) region
         numeric acres
         numeric square_miles
         text gis_api_url
@@ -47,16 +47,16 @@ erDiagram
 
     parcels {
         bigint id PK
-        integer county_id FK
-        varchar parcel_id
+        integer county_id FK "-> counties.id"
+        varchar(50) parcel_id
         bigint objectid UK
         text site_address
         text site_number
         text owner_name
         text owner_address
         numeric acres
-        varchar classification
-        varchar tax_district
+        varchar(255) classification
+        varchar(255) tax_district
         geometry geometry "MultiPolygon 3857"
         timestamp last_sync
         boolean processed
@@ -67,9 +67,9 @@ erDiagram
 
     parcel_taxes {
         bigint id PK
-        integer county_id FK
-        bigint parcel_id FK
-        smallint tax_year
+        integer county_id FK "-> counties.id"
+        bigint parcel_id FK "-> parcels.id"
+        smallint tax_year UK
         numeric tax_amount
         numeric appraised
         numeric assessed
@@ -81,35 +81,35 @@ erDiagram
         smallint z PK
         integer x PK
         integer y PK
-        varchar layer PK
+        varchar(50) layer PK
         bytea data
         timestamp created_at
     }
 
     county_field_mappings {
         bigint id PK
-        integer county_id FK
-        varchar source_field
-        varchar target_column
+        integer county_id FK "-> counties.id"
+        varchar(255) source_field
+        varchar(50) target_column
         text transform
     }
 
     parcel_class_codes {
         smallint id PK
-        integer county_id FK
-        varchar code UK
+        integer county_id FK "-> counties.id"
+        varchar(10) code UK
         text description
-        varchar category
-        varchar color
+        varchar(20) category
+        varchar(7) color
         boolean is_residential "Generated"
     }
 
     import_checkpoints {
         integer id PK
-        varchar county_name UK
-        varchar import_type UK
+        varchar(50) county_name UK
+        varchar(20) import_type UK
         bigint last_processed_id
-        varchar status
+        varchar(20) status
         timestamp start_time
         timestamp end_time
         integer total_processed
