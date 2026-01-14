@@ -15,20 +15,30 @@
 
 A full-stack geospatial web application for visualizing Georgia county boundaries and parcel data. Built with Go, PostgreSQL/PostGIS, and MapLibre GL JS.
 
-| Metric | Value |
-|--------|-------|
-| **Counties** | 159 (100% of Georgia) |
-| **Parcels** | 4,769,152 |
-| **Coverage** | Complete statewide |
-
----
 
 ## Screenshots
 
-| State View | County Parcels | Parcel Details |
-|:----------:|:--------------:|:--------------:|
-| ![Georgia Overview](docs/screenshots/state-view.jpg) | ![County Parcels](docs/screenshots/county-parcels.jpg) | ![Parcel Popup](docs/screenshots/parcel-details.jpg) |
-| *All 159 counties* | *Individual parcels visible at zoom 13+* | *Property info on click* |
+<div align="center">
+  <h3>County & Parcel View</h3>
+  <img src="docs/screenshots/county-parcels.jpg" alt="County Parcels" width="600">
+  <p><em>Individual parcels visible at zoom 13+ with property boundaries</em></p>
+
+  <h3>Property Details</h3>
+  <img src="docs/screenshots/parcel-details.jpg" alt="Parcel Popup" width="600">
+  <p><em>Instant property information popup on click</em></p>
+</div>
+
+---
+
+## Table of Contents
+
+- [How It Works](#how-it-works)
+- [Tech Stack](#tech-stack)
+- [Database Design](#database-design)
+- [Performance](#performance)
+- [CLI Usage](#cli-usage)
+- [Project Structure](#project-structure)
+- [Acknowledgments](#acknowledgments)
 
 ---
 
@@ -98,6 +108,8 @@ flowchart TD
 
 The application uses PostgreSQL with the PostGIS extension for spatial data. The schema is optimized for read-heavy workloads with precomputed columns and strategic indexing.
 
+📖 **[Full Database Documentation →](db/README.md)**
+
 ### Core Tables
 
 | Table | Purpose | Records |
@@ -105,7 +117,7 @@ The application uses PostgreSQL with the PostGIS extension for spatial data. The
 | `counties` | Georgia county boundaries and metadata | 159 |
 | `parcels` | Individual property parcels with geometry | ~4.77M |
 | `parcel_taxes` | Historical tax records per parcel | Growing |
-| `tiles` | Pre-generated MVT vector tiles | ~47M |
+| `tiles` | Pre-generated MVT vector tiles | ~48M |
 | `county_field_mappings` | Maps source API fields to our schema | Variable |
 | `parcel_class_codes` | Land use classification codes per county | Variable |
 | `import_checkpoints` | Tracks import progress for resumability | Variable |
@@ -116,8 +128,6 @@ The application uses PostgreSQL with the PostGIS extension for spatial data. The
 - **GiST Spatial Indexes**: All geometry columns are indexed for fast spatial queries
 - **Pre-generated Tiles**: Vector tiles are generated once and stored gzipped, avoiding real-time geometry processing
 - **Simplified Geometries**: County boundaries have both full and simplified versions (`ST_Simplify`) for zoom-appropriate rendering
-
-📖 **[Full Database Documentation →](db/README.md)**
 
 ---
 
@@ -158,8 +168,6 @@ This design ensures that the most expensive tiles (low zoom with many parcels) s
 
 ## CLI Usage
 
-The server supports various command-line flags for data management:
-
 ```bash
 # Start the web server
 go run main.go
@@ -187,9 +195,6 @@ go run main.go --generate-tiles --county "Fulton" --min-zoom 13 --max-zoom 16
 
 # Import with verbose logging to file
 go run main.go --import-parcels --county "Fulton" --log
-
-# Import county boundaries from SAGIS API
-go run main.go --import-counties
 ```
 
 ### Import Process
@@ -223,7 +228,7 @@ parcel_heatmap/
 │   ├── ga_counties.go   # County boundary import from SAGIS
 │   ├── parcel_importer_gis.go    # ArcGIS REST API importer
 │   ├── parcel_importer_qpublic.go # QPublic/Beacon importer
-│   ├── tax_importer.go  # Property tax data import
+│   ├── tax_importer.go  # Property tax data import (in progress)
 │   └── field_mapper.go  # Dynamic field mapping system
 │
 ├── models/              # GORM model definitions

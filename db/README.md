@@ -1,12 +1,12 @@
 # Database Design
 
-This document provides detailed documentation of the PostgreSQL/PostGIS database schema used by the Parcel Heatmap application.
+This document provides detailed documentation of the PostgreSQL/PostGIS database schema used.
 
 ---
 
 ## Overview
 
-The database uses PostgreSQL 15+ with the PostGIS extension for spatial data operations. The schema is designed for:
+The database uses PostgreSQL 18.1 with the PostGIS extension for spatial data operations. The schema is designed for:
 
 - **Read-heavy workloads**: Precomputed columns eliminate expensive per-request calculations
 - **Resumable imports**: Checkpoint tracking allows interrupted imports to continue
@@ -14,6 +14,23 @@ The database uses PostgreSQL 15+ with the PostGIS extension for spatial data ope
 - **Efficient tile serving**: Pre-generated vector tiles with gzip compression
 
 ---
+
+## Table of Contents
+
+- [Overview](#overview)
+- [Entity Relationship Diagram](#entity-relationship-diagram)
+- [Tables](#tables)
+    - [`counties`](#counties)
+    - [`parcels`](#parcels)
+    - [`parcel_taxes`](#parcel_taxes)
+    - [`tiles`](#tiles)
+    - [`county_field_mappings`](#county_field_mappings)
+    - [`parcel_class_codes`](#parcel_class_codes)
+    - [`import_checkpoints`](#import_checkpoints)
+- [Spatial Considerations](#spatial-considerations)
+- [Precomputed Columns](#precomputed-columns)
+- [Vector Tile Generation](#vector-tile-generation)
+- [Performance Metrics](#performance-metrics)
 
 ## Entity Relationship Diagram
 
@@ -414,25 +431,6 @@ FROM (
 ) AS tile;
 ```
 
-### Tile Storage Stats
-
-| Zoom Level | Avg Tile Size |
-|:----------:|:-------------:|
-| 13 | 43 KB |
-| 14 | 13 KB |
-| 15 | 4.2 KB |
-| 16 | 1.6 KB |
-| 17 | 713 bytes |
-| 18 | 450 bytes |
-| 19 | 355 bytes |
-
-| Metric | Value |
-|--------|-------|
-| Total tiles | ~48 million |
-| Zoom range | 13–19 |
-| Total storage | 29 GB |
-
----
 
 ## Performance Metrics
 
