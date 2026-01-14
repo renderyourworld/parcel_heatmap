@@ -1,12 +1,16 @@
+<div align="center">
+
 # Parcel Heatmap
 
+**Interactive map visualization for Georgia's 4.77 million property parcels**
+
+[![Live Demo](https://img.shields.io/badge/demo-parcels.renderyourworld.com-blue)](https://parcels.renderyourworld.com)
+
+![Georgia Parcel Map](docs/screenshots/state-view.jpg)
+
+</div>
+
 A full-stack geospatial web application for visualizing Georgia county boundaries and parcel data. Built with Go, PostgreSQL/PostGIS, and MapLibre GL JS.
-
-**🔗 Live Demo:** [parcels.renderyourworld.com](https://parcels.renderyourworld.com)
-
----
-
-## Dataset
 
 | Metric | Value |
 |--------|-------|
@@ -14,14 +18,9 @@ A full-stack geospatial web application for visualizing Georgia county boundarie
 | **Parcels** | 4,769,152 |
 | **Coverage** | Complete statewide |
 
-Every county in Georgia is fully mapped with parcel-level detail including property boundaries, owner information, site addresses, and land classification.
-
 ---
 
 ## Screenshots
-
-<!-- Add your screenshots here -->
-<!-- Recommended: 3 screenshots showing different zoom levels -->
 
 | State View | County Parcels | Parcel Details |
 |:----------:|:--------------:|:--------------:|
