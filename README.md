@@ -1,12 +1,12 @@
 <div align="center">
 
-# Parcel Heatmap
+# Georgia Parcel Map
 
-**Interactive map visualization for Georgia's 4.77 million property parcels**
+**Interactive map visualization for Georgia's 4.77 million property parcels across all 159 counties**
 
 [![Live Demo](https://img.shields.io/badge/demo-parcels.renderyourworld.com-blue)](https://parcels.renderyourworld.com)
 
-![Georgia Parcel Map](docs/screenshots/state-view.jpg)
+<img src="docs/screenshots/state-view.jpg" alt="Georgia Parcel Map" width="600">
 
 </div>
 
@@ -35,6 +35,11 @@ When a user loads the map, data flows through multiple optimized layers:
 
 ```mermaid
 flowchart TD
+    subgraph Startup["Server Startup"]
+        S1[Initialize caches] --> S2[Pre-warm PMTiles header]
+        S1 --> S3[Preload county boundaries]
+    end
+
     subgraph Client["Browser"]
         A[User Opens App] --> B[Load index.html + app.js]
         B --> C[Initialize MapLibre]
@@ -44,26 +49,24 @@ flowchart TD
         C --> D[Fetch County Boundaries]
         C --> E[Load PMTiles Basemap]
         D --> F["GET /api/counties/simplified"]
-        F --> G[(PostgreSQL)]
-        G -->|Precomputed JSONB| H[GeoJSON Response]
-        H --> I[Render Counties]
+        S3 -.->|Already in memory| F
+        F --> G[GeoJSON Response]
+        G --> H[Render Counties]
     end
 
     subgraph Zoom["User Zooms to Level 13+"]
-        I --> J[MapLibre requests tiles]
-        J --> K["GET /api/tiles/z/x/y"]
-        K --> L{LRU Cache}
-        L -->|HIT| M[Return cached MVT]
-        L -->|MISS| N[(Query tiles table)]
-        N --> O[Decompress gzip]
-        O --> P[Add to cache]
-        P --> M
-        M --> Q[Render Parcels]
+        H --> I[MapLibre requests tiles]
+        I --> J["GET /api/tiles/z/x/y"]
+        J --> K{LRU Cache}
+        K -->|HIT| L[Return cached MVT]
+        K -->|MISS| M[(Query tiles table)]
+        M --> N[Decompress + cache]
+        N --> L
+        L --> O[Render Parcels]
     end
 
     subgraph Click["User Clicks Parcel"]
-        Q --> R[Query feature properties]
-        R --> S[Display popup]
+        O --> P[Display popup]
     end
 ```
 
