@@ -36,15 +36,15 @@ When a user loads the map, data flows through multiple optimized layers:
 
 ```mermaid
 flowchart TD
-    subgraph Client["🌐 Browser"]
+    subgraph Client["Browser"]
         A[User Opens App] --> B[Load index.html + app.js]
         B --> C[Initialize MapLibre]
     end
 
-    subgraph Initial["Initial Load ~35ms"]
+    subgraph Initial["Initial Load"]
         C --> D[Fetch County Boundaries]
         C --> E[Load PMTiles Basemap]
-        D --> F[/api/counties/simplified/]
+        D --> F["GET /api/counties/simplified"]
         F --> G[(PostgreSQL)]
         G -->|Precomputed JSONB| H[GeoJSON Response]
         H --> I[Render Counties]
@@ -52,8 +52,8 @@ flowchart TD
 
     subgraph Zoom["User Zooms to Level 13+"]
         I --> J[MapLibre requests tiles]
-        J --> K[/api/tiles/z/x/y]
-        K --> L{LRU Cache?}
+        J --> K["GET /api/tiles/z/x/y"]
+        K --> L{LRU Cache}
         L -->|HIT| M[Return cached MVT]
         L -->|MISS| N[(Query tiles table)]
         N --> O[Decompress gzip]
@@ -64,7 +64,7 @@ flowchart TD
 
     subgraph Click["User Clicks Parcel"]
         Q --> R[Query feature properties]
-        R --> S[Display popup with<br/>owner, address, acres, etc.]
+        R --> S[Display popup]
     end
 ```
 
