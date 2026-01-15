@@ -9,6 +9,9 @@
 ![Postgres](https://img.shields.io/badge/postgres-%23316192.svg?style=for-the-badge&logo=postgresql&logoColor=white)
 ![MapLibre](https://img.shields.io/badge/MapLibre-152238?style=for-the-badge&logo=maplibre&logoColor=white)
 [![Go Report Card](https://goreportcard.com/badge/github.com/renderyourworld/parcel_heatmap)](https://goreportcard.com/report/github.com/renderyourworld/parcel_heatmap)
+<br/>
+
+[How It Works](#how-it-works) • [Tech Stack](#tech-stack) • [Database Design](#database-design) • [Performance](#performance) • [CLI Usage](#cli-usage) • [Project Structure](#project-structure)
 
 <img src="docs/screenshots/state-view.jpg" alt="Georgia Parcel Map" width="600">
 
@@ -28,20 +31,6 @@ A full-stack geospatial web application for visualizing Georgia county boundarie
   <img src="docs/screenshots/parcel-details.jpg" alt="Parcel Popup" width="600">
   <p><em>Instant property information popup on click</em></p>
 </div>
-
----
-
-## Table of Contents
-
-- [How It Works](#how-it-works)
-- [Tech Stack](#tech-stack)
-- [Database Design](#database-design)
-- [Performance](#performance)
-- [CLI Usage](#cli-usage)
-- [Project Structure](#project-structure)
-- [Acknowledgments](#acknowledgments)
-
----
 
 ## How It Works
 
