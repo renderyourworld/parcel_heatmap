@@ -16,6 +16,7 @@ import (
 	"github.com/gin-contrib/gzip"
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
+	"github.com/renderyourworld/parcel_heatmap/benchmarks"
 	"github.com/renderyourworld/parcel_heatmap/db"
 	"github.com/renderyourworld/parcel_heatmap/handlers"
 	"github.com/renderyourworld/parcel_heatmap/importers"
@@ -41,6 +42,9 @@ func main() {
 	minZoom := flag.Int("min-zoom", 13, "Minimum zoom level for tile generation")
 	maxZoom := flag.Int("max-zoom", 19, "Maximum zoom level for tile generation")
 
+	benchmark := flag.Bool("benchmark", false, "Run performance benchmark test")
+	benchmarkURL := flag.String("benchmark-url", "http://localhost:9000", "URL to benchmark")
+
 	logging := flag.Bool("log", false, "Enable logging to file in logs/ directory")
 
 	flag.Parse()
@@ -50,6 +54,31 @@ func main() {
 
 	// Initialize the database connection
 	db.Connect()
+
+	// Check if we should run performance benchmark
+	if *benchmark {
+		now := time.Now()
+		// Set up dual logging to terminal and .log file EARLY to capture all output
+		cleanup, err := benchmarks.SetupBenchmarkLogger(now)
+		if err != nil {
+			log.Printf("Warning: Failed to set up benchmark logging: %v", err)
+		} else {
+			defer cleanup()
+		}
+
+		log.Println("Starting performance benchmark...")
+
+		// Run the benchmark
+		report, err := benchmarks.RunPerformanceBenchmark(*benchmarkURL)
+		if err != nil {
+			log.Fatalf("Benchmark failed: %v", err)
+		}
+
+		// Print summary (will go to both terminal and file)
+		benchmarks.PrintBenchmarkSummary(report)
+
+		os.Exit(0)
+	}
 
 	// Check if we should generate tiles for existing parcels
 	if *generateTiles {

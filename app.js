@@ -141,12 +141,19 @@ async function loadMap() {
     ];
 
     // Initialize the map
+    window._tileCount = 0;
     const map = new maplibregl.Map({
         container: 'map',
         center: GEORGIA_CENTER,
         zoom: INITIAL_ZOOM,
         minZoom: 6,
         maxZoom: 19,
+        transformRequest: (url) => {
+            if (url.includes('/api/tiles/')) {
+                window._tileCount++;
+            }
+            return { url };
+        },
         style: {
             version: 8,
             glyphs: 'https://protomaps.github.io/basemaps-assets/fonts/{fontstack}/{range}.pbf',
@@ -176,6 +183,8 @@ async function loadMap() {
             layers: [...basemapLayers, ...countyLayers, ...parcelLayers]
         },
     });
+
+    window.map = map; // Expose map for debugging
 
     // Add navigation controls
     map.addControl(new maplibregl.NavigationControl(), 'top-right');
