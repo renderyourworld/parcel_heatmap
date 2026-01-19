@@ -142,6 +142,7 @@ async function loadMap() {
 
     // Initialize the map
     window._tileCount = 0;
+
     const map = new maplibregl.Map({
         container: 'map',
         center: GEORGIA_CENTER,

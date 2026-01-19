@@ -42,8 +42,10 @@ func main() {
 	minZoom := flag.Int("min-zoom", 13, "Minimum zoom level for tile generation")
 	maxZoom := flag.Int("max-zoom", 19, "Maximum zoom level for tile generation")
 
-	benchmark := flag.Bool("benchmark", false, "Run performance benchmark test")
+	benchmark := flag.Bool("benchmark", false, "Run performance benchmark test using chromedp")
+	benchmarkLighthouse := flag.Bool("benchmark-lighthouse", false, "Run Lighthouse audit")
 	benchmarkURL := flag.String("benchmark-url", "http://localhost:9000", "URL to benchmark")
+	benchmarkMode := flag.String("benchmark-mode", "desktop", "Benchmark mode: mobile or desktop")
 
 	logging := flag.Bool("log", false, "Enable logging to file in logs/ directory")
 
@@ -76,6 +78,18 @@ func main() {
 
 		// Print summary (will go to both terminal and file)
 		benchmarks.PrintBenchmarkSummary(report)
+
+		os.Exit(0)
+	}
+
+	if *benchmarkLighthouse {
+		log.Println("Starting Lighthouse performance benchmark...")
+
+		// Run the benchmark
+		err := benchmarks.RunLighthouseAudit(*benchmarkURL, *benchmarkMode)
+		if err != nil {
+			log.Fatalf("Benchmark failed: %v", err)
+		}
 
 		os.Exit(0)
 	}
