@@ -29,6 +29,7 @@ func main() {
 
 	// Parse command-line flags
 	importParcels := flag.Bool("import-parcels", false, "Run parcel importer for specified county")
+	enrichParcels := flag.Bool("enrich-parcels", false, "Run parcel enrichment for specified county")
 	importTaxes := flag.Bool("import-taxes", false, "Run parcel tax importer for specified county")
 	importCounties := flag.Bool("import-counties", false, "Import all Georgia county boundaries from SAGIS API")
 	county := flag.String("county", "", "County name to import parcels for")
@@ -178,6 +179,69 @@ func main() {
 				time.Sleep(totalDelay)
 			} else {
 				// Last iteration
+				if cleanup != nil {
+					cleanup()
+				}
+			}
+		}
+
+		os.Exit(0)
+	}
+
+	// Check if we should run the enricher instead of starting the server
+	if *enrichParcels {
+		if *county == "" {
+			log.Fatal("Error: --county flag is required when using --enrich-parcels")
+		}
+
+		// Split counties by comma
+		counties := strings.Split(*county, ",")
+		for i, c := range counties {
+			c = strings.TrimSpace(c)
+			if c == "" {
+				continue
+			}
+
+			// Set up file logging if enabled
+			var cleanup func()
+			if *logging {
+				var err error
+				cleanup, err = utils.SetupFileLogger(c, "enrich")
+				if err != nil {
+					log.Printf("Warning: Failed to set up file logging: %v", err)
+				}
+			}
+
+			log.Printf("Starting parcel enrichment for %s county (resume=%v)", c, *resume)
+
+			// Start enrichment
+			if err := importers.StartParcelEnricher(db.DB, c, *resume, *maxParcels, *logging); err != nil {
+				log.Printf("ERROR: Parcel enrichment failed for %s: %v", c, err)
+
+				errStr := strings.ToLower(err.Error())
+				if strings.Contains(errStr, "403") || strings.Contains(errStr, "forbidden") {
+					log.Println("🛑 BLOCKING DETECTED (VPN/Firewall challenge). Stopping enrichment process.")
+					if cleanup != nil {
+						cleanup()
+					}
+					os.Exit(1)
+				}
+			} else {
+				log.Printf("Parcel enrichment completed successfully for %s!", c)
+			}
+
+			// Wait before processing next county
+			if i < len(counties)-1 {
+				delayMin := 2 + rand.Intn(3)
+				delaySeconds := rand.Intn(60)
+				totalDelay := time.Duration(delayMin)*time.Minute + time.Duration(delaySeconds)*time.Second
+
+				fmt.Printf("⏳ Waiting %v before next county...\n", totalDelay)
+				if cleanup != nil {
+					cleanup()
+				}
+				time.Sleep(totalDelay)
+			} else {
 				if cleanup != nil {
 					cleanup()
 				}

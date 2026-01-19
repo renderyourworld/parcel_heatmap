@@ -46,6 +46,26 @@ type VectorLayerResponse struct {
 	D []QPublicParcel `json:"d"` // Contains the array of parcels
 }
 
+// QueryMapDetail API request payload
+type QueryMapDetailRequest struct {
+	LayerID int    `json:"layerId"`
+	Key     string `json:"key"`
+}
+
+// QueryMapDetail API response (HTML string)
+type QueryMapDetailResponse struct {
+	D string `json:"d"` // Contains HTML table
+}
+
+// Parsed enrichment data from HTML
+type ParcelEnrichmentData struct {
+	ClassCode       string
+	TaxDistrict     string
+	PhysicalAddress string
+	OwnerName       string
+	OwnerAddress    string
+}
+
 // Manages QPS tokens and source SRID for QPublic API
 type TokenManager struct {
 	Token       string
@@ -685,6 +705,444 @@ func startQPublicImporter(gormDB *gorm.DB, county *models.County, logging bool) 
 	}
 
 	log.Printf("QPublic import complete! Total parcels: %d", len(parcels))
+
+	return nil
+}
+
+// Normalizes an address string for fuzzy matching
+func normalizeAddress(addr string) string {
+	// Convert to uppercase
+	normalized := strings.ToUpper(strings.TrimSpace(addr))
+
+	// Normalize common abbreviations
+	replacements := map[string]string{
+		" ROAD":    " RD",
+		" STREET":  " ST",
+		" AVENUE":  " AVE",
+		" DRIVE":   " DR",
+		" LANE":    " LN",
+		" COURT":   " CT",
+		" CIRCLE":  " CIR",
+		" PLACE":   " PL",
+		" TERRACE": " TER",
+		" HIGHWAY": " HWY",
+		" PARKWAY": " PKWY",
+		" BOULEVARD": " BLVD",
+	}
+
+	for old, new := range replacements {
+		normalized = strings.ReplaceAll(normalized, old, new)
+	}
+
+	// Remove extra whitespace
+	normalized = strings.Join(strings.Fields(normalized), " ")
+
+	return normalized
+}
+
+// Intelligently parses the Owner field to separate name from mailing address
+func parseOwnerField(ownerContent, physicalAddress string) (ownerName, ownerAddress string) {
+	// Split by <br> tags to get lines
+	lines := regexp.MustCompile(`(?i)<br\s*/?>|\n`).Split(ownerContent, -1)
+
+	// Trim and filter empty lines
+	var cleanLines []string
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			cleanLines = append(cleanLines, line)
+		}
+	}
+
+	if len(cleanLines) == 0 {
+		return "", ""
+	}
+
+	// Strategy 1: Use Physical Address to find the split point
+	if physicalAddress != "" {
+		normalizedPhysical := normalizeAddress(physicalAddress)
+
+		for i, line := range cleanLines {
+			normalizedLine := normalizeAddress(line)
+
+			// Check if this line matches the physical address
+			// Look for matching street number and street name
+			if strings.Contains(normalizedLine, normalizedPhysical) ||
+				strings.Contains(normalizedPhysical, normalizedLine) {
+				// Found the address line - everything before is owner name
+				if i > 0 {
+					ownerName = strings.Join(cleanLines[:i], " ")
+					ownerAddress = strings.Join(cleanLines[i:], " ")
+					return
+				}
+			}
+
+			// Also try matching just the street number and first few chars
+			// Extract first token (street number) from both
+			physicalTokens := strings.Fields(normalizedPhysical)
+			lineTokens := strings.Fields(normalizedLine)
+
+			if len(physicalTokens) > 0 && len(lineTokens) > 0 {
+				// Check if street number matches
+				if physicalTokens[0] == lineTokens[0] && regexp.MustCompile(`^\d+`).MatchString(physicalTokens[0]) {
+					// Numbers match, likely the address line
+					if i > 0 {
+						ownerName = strings.Join(cleanLines[:i], " ")
+						ownerAddress = strings.Join(cleanLines[i:], " ")
+						return
+					}
+				}
+			}
+		}
+	}
+
+	// Strategy 2: Proactively detect PO BOX addresses
+	// If found, split on the PO BOX line (everything before = name, PO BOX + rest = address)
+	// Matches: "PO BOX", "P.O. BOX", "P O BOX", "P.O BOX", etc.
+	poBoxPattern := regexp.MustCompile(`(?i)^P[\s.]?O[\s.]?\s*BOX`)
+
+	for i, line := range cleanLines {
+		trimmedLine := strings.TrimSpace(line)
+
+		if poBoxPattern.MatchString(trimmedLine) {
+			// Found PO BOX line - split here
+			if i > 0 {
+				ownerName = strings.Join(cleanLines[:i], " ")
+				ownerAddress = strings.Join(cleanLines[i:], " ")
+				return
+			}
+			// If PO BOX is the first line, everything is address
+			ownerName = ""
+			ownerAddress = strings.Join(cleanLines, " ")
+			return
+		}
+	}
+
+	// Strategy 3: Fallback - find first line starting with digits (street number)
+	digitPattern := regexp.MustCompile(`^\d+`)
+
+	for i, line := range cleanLines {
+		trimmedLine := strings.TrimSpace(line)
+
+		if digitPattern.MatchString(trimmedLine) {
+			// Found address line (non-PO BOX)
+			if i > 0 {
+				ownerName = strings.Join(cleanLines[:i], " ")
+				ownerAddress = strings.Join(cleanLines[i:], " ")
+				return
+			} else {
+				// Edge case: address is first line, no owner name
+				ownerName = ""
+				ownerAddress = strings.Join(cleanLines, " ")
+				return
+			}
+		}
+	}
+
+	// Strategy 3: No address detected - treat all as owner name
+	ownerName = strings.Join(cleanLines, " ")
+	ownerAddress = ""
+	return
+}
+
+// Parses QueryMapDetail HTML response to extract enrichment fields
+func parseQueryMapDetailHTML(htmlContent string) (*ParcelEnrichmentData, error) {
+	data := &ParcelEnrichmentData{}
+
+	// Pattern: <strong>Label</strong></td>\s*<td[^>]*>(.*?)</td>
+	classCodePattern := regexp.MustCompile(`(?i)<strong>Class\s*Code</strong></td>\s*<td[^>]*>(.*?)</td>`)
+	taxDistrictPattern := regexp.MustCompile(`(?i)<strong>Tax(?:ing)?\s*District</strong></td>\s*<td[^>]*>(.*?)</td>`)
+	physicalAddressPattern := regexp.MustCompile(`(?i)<strong>Physical\s*Address</strong></td>\s*<td[^>]*>(.*?)</td>`)
+	ownerPattern := regexp.MustCompile(`(?i)<strong>Owner</strong></td>\s*<td[^>]*>(.*?)</td>`)
+
+	// Extract Class Code
+	if match := classCodePattern.FindStringSubmatch(htmlContent); len(match) > 1 {
+		data.ClassCode = strings.TrimSpace(match[1])
+	}
+
+	// Extract Tax District
+	if match := taxDistrictPattern.FindStringSubmatch(htmlContent); len(match) > 1 {
+		data.TaxDistrict = strings.TrimSpace(match[1])
+	}
+
+	// Extract Physical Address
+	if match := physicalAddressPattern.FindStringSubmatch(htmlContent); len(match) > 1 {
+		data.PhysicalAddress = strings.TrimSpace(match[1])
+	}
+
+	// Extract Owner field and intelligently parse it
+	if match := ownerPattern.FindStringSubmatch(htmlContent); len(match) > 1 {
+		ownerContent := match[1]
+		data.OwnerName, data.OwnerAddress = parseOwnerField(ownerContent, data.PhysicalAddress)
+	}
+
+	return data, nil
+}
+
+// Fetches enrichment data for a single parcel via QueryMapDetail API
+func (ps *QPublicScraper) FetchParcelDetail(parcelKey string) (*ParcelEnrichmentData, error) {
+	// Get current token
+	qpsToken, err := ps.TokenManager.GetQPSToken(false)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get QPS token: %w", err)
+	}
+
+	// Build request payload
+	payload := QueryMapDetailRequest{
+		LayerID: ps.LayerID,
+		Key:     parcelKey,
+	}
+
+	jsonData, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal payload: %w", err)
+	}
+
+	// Build URL
+	url := fmt.Sprintf("https://qpublic.schneidercorp.com/api/beaconCore/QueryMapDetail?QPS=%s", qpsToken)
+
+	// Create POST request
+	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return nil, err
+	}
+
+	// Apply randomized headers (reuse existing function)
+	headers := getRandomHeaders(ps.TokenManager.GisApiUrl)
+	for key, value := range headers {
+		req.Header.Set(key, value)
+	}
+
+	// Make request
+	resp, err := ps.TokenManager.HTTPClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to make request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	ps.RequestCount++
+
+	// Handle 403 (Cloudflare Challenge) - same pattern as FetchParcels
+	if resp.StatusCode == 403 {
+		log.Println("Got 403, waiting 3s and retrying with new headers...")
+		time.Sleep(3 * time.Second)
+
+		req, _ = http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
+		headers = getRandomHeaders(ps.TokenManager.GisApiUrl)
+		for key, value := range headers {
+			req.Header.Set(key, value)
+		}
+
+		resp, err = ps.TokenManager.HTTPClient.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("retry failed: %w", err)
+		}
+		defer resp.Body.Close()
+		ps.RequestCount++
+
+		if resp.StatusCode == 403 {
+			body, _ := io.ReadAll(resp.Body)
+			return nil, fmt.Errorf("got 403 after retry: %s", string(body[:min(200, len(body))]))
+		}
+	}
+
+	// Check status code
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("unexpected status %d: %s", resp.StatusCode, string(body))
+	}
+
+	// Parse response
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	var response QueryMapDetailResponse
+	err = json.Unmarshal(body, &response)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse JSON: %w", err)
+	}
+
+	// Parse HTML content
+	data, err := parseQueryMapDetailHTML(response.D)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse HTML: %w", err)
+	}
+
+	return data, nil
+}
+
+// Updates parcel enrichment fields in database
+func updateParcelEnrichment(db *gorm.DB, countyID uint16, parcelID string, data *ParcelEnrichmentData) error {
+	updates := make(map[string]interface{})
+
+	if data.PhysicalAddress != "" {
+		updates["site_address"] = data.PhysicalAddress
+	}
+	if data.OwnerName != "" {
+		updates["owner_name"] = data.OwnerName
+	}
+	if data.OwnerAddress != "" {
+		updates["owner_address"] = data.OwnerAddress
+	}
+	if data.ClassCode != "" {
+		updates["classification"] = data.ClassCode
+	}
+	if data.TaxDistrict != "" {
+		updates["tax_district"] = data.TaxDistrict
+	}
+
+	// Only update if we have at least one field to update
+	if len(updates) == 0 {
+		return nil
+	}
+
+	// Add last_sync timestamp
+	updates["last_sync"] = time.Now()
+
+	return db.Model(&models.Parcel{}).
+		Where("county_id = ? AND parcel_id = ?", countyID, parcelID).
+		Updates(updates).Error
+}
+
+// Enriches parcels for a QPublic county with QueryMapDetail data
+func startQPublicEnricher(gormDB *gorm.DB, county *models.County, resume bool, maxParcels int, logging bool) error {
+	log.Printf("Starting QPublic enricher for %s", county.Name)
+	log.Printf("Found county: %s (ID: %d, API: %s)", county.Name, county.ID, county.GisApiUrl.String)
+
+	// Extract LayerID from URL
+	layerID, err := parseLayerIDFromURL(county.GisApiUrl.String)
+	if err != nil {
+		return fmt.Errorf("failed to parse LayerID from URL: %w", err)
+	}
+	log.Printf("Extracted LayerID: %d", layerID)
+
+	// Create token manager
+	tokenManager := NewTokenManager(county.GisApiUrl.String)
+
+	// Pre-fetch token
+	_, err = tokenManager.GetQPSToken(false)
+	if err != nil {
+		return fmt.Errorf("failed to get initial QPS token: %w", err)
+	}
+
+	// Create scraper (reuse for token management and HTTP client)
+	scraper := NewQPublicScraper(tokenManager, layerID)
+
+	// Initialize or resume checkpoint
+	checkpoint, err := initializeCheckpoint(gormDB, county.Name, "qpublic_enrich", resume)
+	if err != nil {
+		return err
+	}
+
+	log.Printf("Checkpoint initialized: last_processed_id=%d, status=%s",
+		checkpoint.LastProcessedID, checkpoint.Status)
+
+	// Initialize performance logger
+	perfLogger := utils.NewPerfLogger(logging)
+	if logging {
+		log.Println("Performance logging enabled for enrichment")
+	}
+
+	// Fetch total parcel count for progress tracking
+	var totalParcels int64
+	if err := gormDB.Model(&models.Parcel{}).Where("county_id = ?", county.ID).Count(&totalParcels).Error; err != nil {
+		log.Printf("Warning: Could not fetch total count: %v. Continuing anyway...", err)
+		totalParcels = -1
+	} else {
+		log.Printf("Total parcels to enrich in county: %d", totalParcels)
+	}
+
+	successCount := 0
+	failCount := 0
+	currentID := uint64(checkpoint.LastProcessedID)
+	stopEnrichment := false
+	const batchSize = 100 // Fetch parcels in batches from DB
+
+	for {
+		// Fetch batch of parcels from database
+		var parcels []models.Parcel
+		if err := gormDB.Select("id, parcel_id").
+			Where("county_id = ? AND id > ?", county.ID, currentID).
+			Order("id ASC").
+			Limit(batchSize).
+			Find(&parcels).Error; err != nil {
+			return fmt.Errorf("failed to fetch parcels batch: %w", err)
+		}
+
+		if len(parcels) == 0 {
+			log.Println("No more parcels to process. Enrichment complete.")
+			break
+		}
+
+		for _, parcel := range parcels {
+			// Check if we've reached the max parcels limit
+			if maxParcels > 0 && successCount >= maxParcels {
+				log.Printf("Reached max parcels limit (%d). Stopping enrichment.", maxParcels)
+				stopEnrichment = true
+				break
+			}
+
+			// Rate limiting with jitter (1-3 seconds)
+			jitter := time.Duration(rand.Intn(2000)) * time.Millisecond
+			time.Sleep(1*time.Second + jitter)
+
+			// Fetch enrichment data
+			enrichData, err := scraper.FetchParcelDetail(parcel.ParcelID)
+			if err != nil {
+				// Check for 403/blocking errors
+				errStr := strings.ToLower(err.Error())
+				if strings.Contains(errStr, "403") || strings.Contains(errStr, "forbidden") {
+					log.Printf("CRITICAL: Got 403 for parcel %s. Stopping to avoid lockout.", parcel.ParcelID)
+					stopEnrichment = true
+					break
+				}
+
+				log.Printf("ERROR: Failed to fetch enrichment for parcel %s (ID %d): %v",
+					parcel.ParcelID, parcel.ID, err)
+				failCount++
+				currentID = parcel.ID
+				continue
+			}
+
+			// Update database
+			if err := updateParcelEnrichment(gormDB, county.ID, parcel.ParcelID, enrichData); err != nil {
+				log.Printf("ERROR: Failed to update parcel %s: %v", parcel.ParcelID, err)
+				failCount++
+			} else {
+				successCount++
+			}
+
+			currentID = parcel.ID
+
+			// Update performance logger
+			perfLogger.Update(successCount, 10*time.Second)
+		}
+
+		// Update checkpoint after batch
+		if err := updateCheckpoint(gormDB, county.Name, "qpublic_enrich", int64(currentID), successCount, failCount); err != nil {
+			log.Printf("Warning: Failed to update checkpoint: %v", err)
+		}
+
+		if totalParcels > 0 {
+			log.Printf("Progress: %d/%d enriched (%d failed)", successCount, totalParcels, failCount)
+		} else {
+			log.Printf("Progress: %d enriched (%d failed)", successCount, failCount)
+		}
+
+		if stopEnrichment {
+			break
+		}
+	}
+
+	// Mark enrichment as complete
+	if err := completeCheckpoint(gormDB, county.Name, "qpublic_enrich", successCount, failCount); err != nil {
+		log.Printf("Warning: Failed to mark checkpoint complete: %v", err)
+	}
+
+	log.Printf("QPublic enrichment complete! Total enriched: %d, Failed: %d", successCount, failCount)
+	perfLogger.LogFinal()
 
 	return nil
 }
