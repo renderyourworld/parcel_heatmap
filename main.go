@@ -44,7 +44,7 @@ func main() {
 
 	benchmark := flag.Bool("benchmark", false, "Run performance benchmark test using chromedp")
 	benchmarkLighthouse := flag.Bool("benchmark-lighthouse", false, "Run Lighthouse audit")
-	benchmarkURL := flag.String("benchmark-url", "http://localhost:9000", "URL to benchmark")
+	benchmarkURL := flag.String("benchmark-url", "lan", "URL to benchmark")
 	benchmarkMode := flag.String("benchmark-mode", "desktop", "Benchmark mode: mobile or desktop")
 
 	logging := flag.Bool("log", false, "Enable logging to file in logs/ directory")
@@ -61,7 +61,7 @@ func main() {
 	if *benchmark {
 		now := time.Now()
 		// Set up dual logging to terminal and .log file EARLY to capture all output
-		cleanup, err := benchmarks.SetupBenchmarkLogger(now)
+		cleanup, err := benchmarks.SetupBenchmarkLogger(now, *benchmarkURL)
 		if err != nil {
 			log.Printf("Warning: Failed to set up benchmark logging: %v", err)
 		} else {

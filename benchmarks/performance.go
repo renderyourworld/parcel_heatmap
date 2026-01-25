@@ -111,7 +111,14 @@ func RunLighthouseAudit(url string, mode string) error {
 	if err := os.MkdirAll(outDir, 0755); err != nil {
 		return fmt.Errorf("failed to create output dir: %w", err)
 	}
-	outPath := fmt.Sprintf("%s/lighthouse_%s.html", outDir, ts)
+	outPath := fmt.Sprintf("%s/lighthouse_%s_%s_%s.html", outDir, url, mode, ts)
+
+	switch url {
+	case "wan":
+		url = "https://parcels.renderyourworld.com"
+	case "lan":
+		url = "http://localhost:9000"
+	}
 
 	// Default to desktop unless mode is explicitly "mobile"
 	args := []string{
@@ -157,7 +164,13 @@ func RunLighthouseAudit(url string, mode string) error {
 func RunPerformanceBenchmark(url string) (*BenchmarkReport, error) {
 	startTime := time.Now()
 
-	log.Println("Starting performance benchmark...")
+	switch url {
+	case "wan":
+		url = "https://parcels.renderyourworld.com"
+	case "lan":
+		url = "http://localhost:9000"
+	}
+
 	log.Printf("Target URL: %s", url)
 
 	// Setup Chrome
@@ -654,13 +667,13 @@ func getFloat(m map[string]interface{}, key string) float64 {
 	return 0.0
 }
 
-func SetupBenchmarkLogger(timestamp time.Time) (cleanup func(), err error) {
+func SetupBenchmarkLogger(timestamp time.Time, url string) (cleanup func(), err error) {
 	if err := os.MkdirAll("logs/benchmarks", 0755); err != nil {
 		return nil, fmt.Errorf("failed to create benchmarks directory: %w", err)
 	}
 
-	filename := fmt.Sprintf("logs/benchmarks/benchmark_%s.log",
-		timestamp.Format("2006-01-02_150405"))
+	filename := fmt.Sprintf("logs/benchmarks/benchmark_%s_%s.log",
+		url, timestamp.Format("2006-01-02_150405"))
 
 	file, err := os.OpenFile(filename, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
