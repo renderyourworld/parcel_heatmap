@@ -479,10 +479,28 @@ func main() {
 	router.StaticFile("/styles/dark.json", "./styles/dark.json")
 	router.GET("/georgia.pmtiles", handlers.ServePMTilesWithCache)
 
-	// Serve fonts and sprites with aggressive caching
-	router.Static("/fonts", "./static/fonts")
-	router.Static("/sprites", "./static/sprites")
-	router.Static("/lib", "./static/lib")
+	// // Serve fonts and sprites with aggressive caching
+	// router.Static("/fonts", "./static/fonts")
+	// router.Static("/sprites", "./static/sprites")
+	// router.Static("/lib", "./static/lib")
+
+	// Serve lib files with aggressive caching
+	router.GET("/lib/*filepath", func(c *gin.Context) {
+		c.Header("Cache-Control", "public, max-age=31536000, immutable")
+		c.File("./static/lib" + c.Param("filepath"))
+	})
+
+	// Serve fonts with aggressive caching
+	router.GET("/fonts/*filepath", func(c *gin.Context) {
+		c.Header("Cache-Control", "public, max-age=31536000, immutable")
+		c.File("./static/fonts" + c.Param("filepath"))
+	})
+
+	// Serve sprites with aggressive caching
+	router.GET("/sprites/*filepath", func(c *gin.Context) {
+		c.Header("Cache-Control", "public, max-age=31536000, immutable")
+		c.File("./static/sprites" + c.Param("filepath"))
+	})
 
 	// Register API routes
 	api := router.Group("/api")

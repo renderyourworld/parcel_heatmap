@@ -1,14 +1,19 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Parcel Heatmap Project</title>
 
     <link rel="stylesheet" href="lib/maplibre-gl.css" />
-    
+
     <style>
-        body { margin: 0; padding: 0; }
+        body {
+            margin: 0;
+            padding: 0;
+        }
+
         #map {
             position: absolute;
             top: 0;
@@ -17,11 +22,13 @@
         }
     </style>
 </head>
+
 <body>
     <div id="map"></div>
 
-    <script src="lib/maplibre-gl.js"></script>
-    <script src="lib/pmtiles.js"></script>
-    <script src="app.js"></script>
+    <script defer src="lib/maplibre-gl.js"></script>
+    <script defer src="lib/pmtiles.js"></script>
+    <script defer src="app.js"></script>
 </body>
+
 </html>
