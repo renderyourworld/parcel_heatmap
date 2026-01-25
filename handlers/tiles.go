@@ -1,8 +1,6 @@
 package handlers
 
 import (
-	"bytes"
-	"compress/gzip"
 	"fmt"
 	"io"
 	"log"
@@ -49,10 +47,11 @@ func GetVectorTile(c *gin.Context) {
 		return
 	}
 
-	// Check Cache first
+	// Check Cache first (cached data is gzip-compressed)
 	if tiles.ParcelTilesCache != nil {
 		if cachedData, hit := tiles.ParcelTilesCache.Get(z, x, y); hit {
 			c.Header("Content-Type", "application/x-protobuf")
+			c.Header("Content-Encoding", "gzip")
 			c.Header("Cache-Control", "public, max-age=2592000, immutable")
 			c.Header("X-Cache", "HIT")
 			c.Data(http.StatusOK, "application/x-protobuf", cachedData)
@@ -61,6 +60,7 @@ func GetVectorTile(c *gin.Context) {
 	}
 
 	// Get tile from database if there is a cache miss
+	// Tiles are stored gzip-compressed in the database
 	var tileData []byte
 	row := db.DB.Raw(`
 		SELECT data 
@@ -86,40 +86,91 @@ func GetVectorTile(c *gin.Context) {
 		return
 	}
 
-	// Decompress the gzipped tile data (stored compressed in database)
-	// MapLibre wants uncompressed MVT data
-	reader, err := gzip.NewReader(bytes.NewReader(tileData))
+	// Put compressed data in cache
+	if tiles.ParcelTilesCache != nil {
+		tiles.ParcelTilesCache.Put(z, x, y, tileData)
+	}
+
+	// Return gzip-compressed MVT tile directly - browser handles decompression
+	c.Header("Content-Type", "application/x-protobuf")
+	c.Header("Content-Encoding", "gzip")
+	c.Header("Cache-Control", "public, max-age=2592000, immutable") // Cache for 30 days, tiles never change
+	c.Header("X-Cache", "MISS")
+	c.Data(http.StatusOK, "application/x-protobuf", tileData)
+}
+
+// GetCountyTile serves pre-generated MVT tiles for county boundaries
+// URL format: /api/tiles/counties/{z}/{x}/{y}
+func GetCountyTile(c *gin.Context) {
+	// Parse tile coordinates from URL
+	z, err := strconv.Atoi(c.Param("z"))
 	if err != nil {
-		log.Printf("ERROR: Failed to decompress tile %d/%d/%d: %v", z, x, y, err)
+		c.Status(http.StatusBadRequest)
+		return
+	}
+
+	x, err := strconv.Atoi(c.Param("x"))
+	if err != nil {
+		c.Status(http.StatusBadRequest)
+		return
+	}
+
+	y, err := strconv.Atoi(c.Param("y"))
+	if err != nil {
+		c.Status(http.StatusBadRequest)
+		return
+	}
+
+	// Create cache key
+	cacheKey := fmt.Sprintf("%d/%d/%d", z, x, y)
+
+	// Check cache first
+	if tiles.CountyTilesCache != nil {
+		if cachedData, ok := tiles.CountyTilesCache.Load(cacheKey); ok {
+			c.Header("Content-Type", "application/x-protobuf")
+			c.Header("Content-Encoding", "gzip")
+			c.Header("Cache-Control", "public, max-age=2592000, immutable")
+			c.Header("X-Cache", "HIT")
+			c.Data(http.StatusOK, "application/x-protobuf", cachedData.([]byte))
+			return
+		}
+	}
+
+	// Get tile from database (county tiles are stored gzip-compressed)
+	var tileData []byte
+	row := db.DB.Raw(`
+		SELECT data 
+		FROM tiles 
+		WHERE z = ? AND x = ? AND y = ? AND layer = 'counties'
+	`, z, x, y).Row()
+
+	err = row.Scan(&tileData)
+	if err != nil {
+		if err.Error() == "sql: no rows in result set" {
+			c.Status(http.StatusNoContent)
+			return
+		}
+		log.Printf("ERROR: Failed to query county tile %d/%d/%d: %v", z, x, y, err)
 		c.Status(http.StatusInternalServerError)
 		return
 	}
-	defer reader.Close()
 
-	uncompressed, err := io.ReadAll(reader)
-	if err != nil {
-		log.Printf("ERROR: Failed to read decompressed tile %d/%d/%d: %v", z, x, y, err)
-		c.Status(http.StatusInternalServerError)
-		return
-	}
-
-	// Debug: Log tile info
-	if len(uncompressed) == 0 {
-		log.Printf("WARNING: Tile %d/%d/%d decompressed to 0 bytes (was %d bytes compressed)", z, x, y, len(tileData))
+	if len(tileData) == 0 {
 		c.Status(http.StatusNoContent)
 		return
 	}
 
-	// Put in Cache
-	if tiles.ParcelTilesCache != nil && len(uncompressed) > 0 {
-		tiles.ParcelTilesCache.Put(z, x, y, uncompressed)
+	// Store in cache
+	if tiles.CountyTilesCache != nil {
+		tiles.CountyTilesCache.Store(cacheKey, tileData)
 	}
 
-	// Return uncompressed MVT tile
+	// Return gzip-compressed MVT tile directly
 	c.Header("Content-Type", "application/x-protobuf")
-	c.Header("Cache-Control", "public, max-age=2592000, immutable") // Cache for 30 days, tiles never change
+	c.Header("Content-Encoding", "gzip")
+	c.Header("Cache-Control", "public, max-age=2592000, immutable")
 	c.Header("X-Cache", "MISS")
-	c.Data(http.StatusOK, "application/x-protobuf", uncompressed)
+	c.Data(http.StatusOK, "application/x-protobuf", tileData)
 }
 
 // ServePMTilesWithCache serves georgia.pmtiles with a map zoom-based LRU cache
@@ -236,7 +287,23 @@ func GetCacheStats(c *gin.Context) {
 	if tiles.ParcelTilesCache != nil {
 		stats += tiles.ParcelTilesCache.Stats()
 	} else {
-		stats += "Tile Cache: Not initialized\n"
+		stats += "Parcel Tile Cache: Not initialized\n"
+	}
+
+	if tiles.CountyTilesCache != nil {
+		var count int
+		var size int64
+		tiles.CountyTilesCache.Range(func(key, value interface{}) bool {
+			count++
+			if data, ok := value.([]byte); ok {
+				size += int64(len(data))
+			}
+			return true
+		})
+		stats += fmt.Sprintf("\nCounty Tile Cache Stats:\n  Entries: %d\n  Cache Size: %.2f MB\n",
+			count, float64(size)/1024/1024)
+	} else {
+		stats += "\nCounty Tile Cache: Not initialized\n"
 	}
 
 	if tiles.PMTilesCache != nil {

@@ -17,17 +17,6 @@ async function loadMap() {
     const data = await response.json();
     const basemapLayers = data.layers;
 
-    // Preload county boundary data
-    const [simplifiedCounties, fullCounties] = await Promise.all([
-        fetch('/api/counties/simplified').then(r => r.json()),
-        fetch('/api/counties/full').then(r => r.json())
-    ]);
-
-    // Ensure all county features have unique IDs for feature-state
-    fullCounties.features.forEach((f, i) => {
-        if (f.id === undefined || f.id === null) f.id = i;
-    });
-
     // Parcel Layers
     const parcelLayers = [
         {
@@ -83,25 +72,13 @@ async function loadMap() {
         }
     ];
 
-    // County Boundary Layers
+    // County Boundary Layers (from vector tiles)
     const countyLayers = [
         {
-            id: 'county-outline-simplified',
+            id: 'county-outline',
             type: 'line',
-            source: 'counties-simplified',
-            minzoom: 0,
-            maxzoom: 9,
-            paint: {
-                'line-color': '#007BFF',
-                'line-width': 1
-            }
-        },
-        {
-            id: 'county-outline-full',
-            type: 'line',
-            source: 'counties-full',
-            minzoom: 9,
-            maxzoom: 19,
+            source: 'counties',
+            'source-layer': 'counties',
             paint: {
                 'line-color': [
                     'case',
@@ -112,10 +89,10 @@ async function loadMap() {
             }
         },
         {
-            id: 'county-fill-full',
+            id: 'county-fill',
             type: 'fill',
-            source: 'counties-full',
-            minzoom: 0,
+            source: 'counties',
+            'source-layer': 'counties',
             maxzoom: 13,
             paint: {
                 'fill-color': '#88C0D0',
@@ -125,7 +102,8 @@ async function loadMap() {
         {
             id: 'county-labels',
             type: 'symbol',
-            source: 'counties-simplified',
+            source: 'counties',
+            'source-layer': 'counties',
             maxzoom: 13,
             layout: {
                 'text-field': ['get', 'name'],
@@ -157,8 +135,8 @@ async function loadMap() {
         },
         style: {
             version: 8,
-            glyphs: 'https://protomaps.github.io/basemaps-assets/fonts/{fontstack}/{range}.pbf',
-            sprite: "https://protomaps.github.io/basemaps-assets/sprites/v4/light", // /v4/dark for dark mode
+            glyphs: '/fonts/{fontstack}/{range}.pbf',
+            sprite: `${window.location.origin}/sprites/v4/light`, // /v4/dark for dark mode
             sources: {
                 'protomaps': {
                     type: 'vector',
@@ -172,13 +150,12 @@ async function loadMap() {
                     maxzoom: 19,
                     promoteId: 'feature_id'
                 },
-                'counties-simplified': {
-                    type: 'geojson',
-                    data: simplifiedCounties
-                },
-                'counties-full': {
-                    type: 'geojson',
-                    data: fullCounties
+                'counties': {
+                    type: 'vector',
+                    tiles: [`${window.location.origin}/api/tiles/counties/{z}/{x}/{y}`],
+                    minzoom: 0,
+                    maxzoom: 12,
+                    promoteId: 'id'
                 }
             },
             layers: [...basemapLayers, ...countyLayers, ...parcelLayers]
@@ -242,7 +219,7 @@ async function loadMap() {
     });
 
     // County click handlers
-    map.on('click', 'county-fill-full', (e) => {
+    map.on('click', 'county-fill', (e) => {
         if (e.features.length === 0) return;
 
         const feature = e.features[0];
@@ -250,7 +227,7 @@ async function loadMap() {
         // Clear previous selection
         if (selectedCountyId !== null) {
             map.setFeatureState(
-                { source: 'counties-full', id: selectedCountyId },
+                { source: 'counties', sourceLayer: 'counties', id: selectedCountyId },
                 { selected: false }
             );
         }
@@ -258,7 +235,7 @@ async function loadMap() {
         // Set new selection
         selectedCountyId = feature.id;
         map.setFeatureState(
-            { source: 'counties-full', id: selectedCountyId },
+            { source: 'counties', sourceLayer: 'counties', id: selectedCountyId },
             { selected: true }
         );
 
@@ -280,10 +257,10 @@ async function loadMap() {
     });
 
     // Change cursor on hover for counties
-    map.on('mouseenter', 'county-fill-full', () => {
+    map.on('mouseenter', 'county-fill', () => {
         map.getCanvas().style.cursor = 'pointer';
     });
-    map.on('mouseleave', 'county-fill-full', () => {
+    map.on('mouseleave', 'county-fill', () => {
         map.getCanvas().style.cursor = '';
     });
 
@@ -309,10 +286,10 @@ async function loadMap() {
         }
 
         // Handle county deselection
-        const countyFeatures = map.queryRenderedFeatures(e.point, { layers: ['county-fill-full'] });
+        const countyFeatures = map.queryRenderedFeatures(e.point, { layers: ['county-fill'] });
         if (countyFeatures.length === 0 && selectedCountyId !== null) {
             map.setFeatureState(
-                { source: 'counties-full', id: selectedCountyId },
+                { source: 'counties', sourceLayer: 'counties', id: selectedCountyId },
                 { selected: false }
             );
             selectedCountyId = null;

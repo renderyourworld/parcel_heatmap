@@ -122,6 +122,7 @@ func (tc *TileCache) Stats() string {
 
 // Tiles cache instances
 var ParcelTilesCache *TileCache
+var CountyTilesCache *sync.Map // Simple map for county tiles (no eviction, few tiles)
 var PMTilesCache *lru.Cache[string, []byte]
 var PMTilesSize uint64
 

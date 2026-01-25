@@ -313,3 +313,182 @@ func GenerateTilesForCounty(db *gorm.DB, countyID uint16, countyName string, min
 
 	return nil
 }
+
+// generateCountyTile creates an MVT tile for county boundaries at the given Z/X/Y
+// Returns gzipped MVT binary data
+func generateCountyTile(db *gorm.DB, z, x, y int) ([]byte, error) {
+	query := `
+		SELECT ST_AsMVT(tile, 'counties', 4096, 'geom') AS mvt
+		FROM (
+			SELECT 
+				ST_AsMVTGeom(
+					ST_Transform(c.boundary, 3857),  -- Transform from 4326 to 3857
+					ST_TileEnvelope($1, $2, $3),
+					4096,
+					256,  -- buffer pixels
+					true  -- clip geometry to tile bounds
+				) AS geom,
+				c.id,
+				c.name,
+				c.state,
+				c.population,
+				c.region,
+				c.acres,
+				c.square_miles
+			FROM counties c
+			WHERE ST_Transform(c.boundary, 3857) && ST_TileEnvelope($1, $2, $3)
+		) AS tile
+		WHERE geom IS NOT NULL
+	`
+
+	var mvtData []byte
+	row := db.Raw(query, z, x, y).Row()
+	err := row.Scan(&mvtData)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate county MVT for tile %d/%d/%d: %w", z, x, y, err)
+	}
+
+	// ST_AsMVT returns a small empty MVT blob even when there are no features
+	if len(mvtData) == 0 || len(mvtData) < 50 {
+		return nil, nil
+	}
+
+	// Gzip compress for storage
+	compressed, err := utils.Gzip(mvtData)
+	if err != nil {
+		return nil, fmt.Errorf("failed to compress county MVT: %w", err)
+	}
+
+	return compressed, nil
+}
+
+// GenerateCountyTiles generates vector tiles for all Georgia county boundaries
+func GenerateCountyTiles(db *gorm.DB, minZoom, maxZoom int, logging bool) error {
+	log.Printf("Starting county tile generation (zoom %d-%d)...", minZoom, maxZoom)
+
+	// Initialize performance logger
+	perfLogger := utils.NewPerfLogger(logging)
+
+	// Get Georgia bounding box from all counties
+	var bounds struct {
+		MinX float64
+		MinY float64
+		MaxX float64
+		MaxY float64
+	}
+
+	if err := db.Raw(`
+		SELECT 
+			ST_XMin(ST_Transform(ST_Collect(boundary), 3857)) as min_x,
+			ST_YMin(ST_Transform(ST_Collect(boundary), 3857)) as min_y,
+			ST_XMax(ST_Transform(ST_Collect(boundary), 3857)) as max_x,
+			ST_YMax(ST_Transform(ST_Collect(boundary), 3857)) as max_y
+		FROM counties
+	`).Scan(&bounds).Error; err != nil {
+		return fmt.Errorf("failed to get Georgia bounds: %w", err)
+	}
+
+	// Calculate tile coordinates for each zoom level
+	var tiles []tileCoord
+	for z := minZoom; z <= maxZoom; z++ {
+		var zoomTiles []struct {
+			X int
+			Y int
+		}
+
+		// Calculate tile range for Georgia at this zoom level
+		if err := db.Raw(`
+			WITH bounds AS (
+				SELECT ST_Transform(ST_Collect(boundary), 3857) AS geom FROM counties
+			),
+			tile_range AS (
+				SELECT 
+					FLOOR((ST_XMin(geom) + 20037508.34) / (20037508.34 * 2 / POW(2, $1::int)))::int AS min_x,
+					CEIL((ST_XMax(geom) + 20037508.34) / (20037508.34 * 2 / POW(2, $1::int)))::int AS max_x,
+					FLOOR((20037508.34 - ST_YMax(geom)) / (20037508.34 * 2 / POW(2, $1::int)))::int AS min_y,
+					CEIL((20037508.34 - ST_YMin(geom)) / (20037508.34 * 2 / POW(2, $1::int)))::int AS max_y
+				FROM bounds
+			)
+			SELECT DISTINCT x, y
+			FROM tile_range,
+			     generate_series(min_x, max_x) AS x,
+			     generate_series(min_y, max_y) AS y
+			WHERE ST_Intersects(
+				ST_TileEnvelope($1::int, x::int, y::int), 
+				(SELECT geom FROM bounds)
+			)
+		`, z).Scan(&zoomTiles).Error; err != nil {
+			return fmt.Errorf("failed to find county tiles for zoom %d: %w", z, err)
+		}
+
+		log.Printf("Zoom %d: found %d tiles covering Georgia", z, len(zoomTiles))
+
+		for _, t := range zoomTiles {
+			tiles = append(tiles, tileCoord{z: z, x: t.X, y: t.Y})
+		}
+	}
+
+	totalTiles := len(tiles)
+	log.Printf("Generating %d county tiles (zoom %d-%d)...", totalTiles, minZoom, maxZoom)
+
+	// Generate tiles (simpler approach since there are fewer tiles than parcels)
+	ctx := context.Background()
+	batch := &pgx.Batch{}
+	batchCount := 0
+	storedCount := 0
+	emptyCount := 0
+	errorCount := 0
+
+	for i, tile := range tiles {
+		mvtData, err := generateCountyTile(db, tile.z, tile.x, tile.y)
+		if err != nil {
+			log.Printf("ERROR: Failed to generate county tile %d/%d/%d: %v", tile.z, tile.x, tile.y, err)
+			errorCount++
+			continue
+		}
+
+		if mvtData == nil {
+			emptyCount++
+			continue
+		}
+
+		// Queue tile for batch insertion
+		batch.Queue(`
+			INSERT INTO tiles (z, x, y, layer, data, created_at)
+			VALUES ($1, $2, $3, 'counties', $4, NOW())
+			ON CONFLICT (z, x, y, layer) DO UPDATE SET
+			data = EXCLUDED.data,
+			created_at = NOW()
+		`, tile.z, tile.x, tile.y, mvtData)
+		batchCount++
+
+		// Flush batch
+		if batchCount >= 50 || i == totalTiles-1 {
+			if err := flushBatch(ctx, batch, batchCount); err != nil {
+				log.Printf("ERROR: Failed to flush batch: %v", err)
+				errorCount += batchCount
+			} else {
+				storedCount += batchCount
+			}
+			batch = &pgx.Batch{}
+			batchCount = 0
+		}
+
+		// Progress logging
+		perfLogger.Update(i+1, 10*time.Second)
+		if (i+1)%100 == 0 || i == totalTiles-1 {
+			progress := float64(i+1) / float64(totalTiles) * 100
+			log.Printf("Progress: %d/%d tiles (%.1f%%) - %d stored, %d empty, %d errors",
+				i+1, totalTiles, progress, storedCount, emptyCount, errorCount)
+		}
+	}
+
+	log.Printf("County tile generation complete: %d tiles stored, %d empty, %d errors", storedCount, emptyCount, errorCount)
+	perfLogger.LogFinal()
+
+	if errorCount > 0 {
+		return fmt.Errorf("county tile generation completed with %d errors", errorCount)
+	}
+
+	return nil
+}

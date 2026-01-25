@@ -9,6 +9,7 @@ import (
 	"mime"
 	"os"
 	"strings"
+	"sync"
 	atomic "sync/atomic"
 	"time"
 
@@ -39,6 +40,7 @@ func main() {
 	skipTiles := flag.Bool("skip-tiles", false, "Skip tile generation after import (for testing)")
 
 	generateTiles := flag.Bool("generate-tiles", false, "Generate vector tiles for existing parcels")
+	generateCountyTiles := flag.Bool("generate-county-tiles", false, "Generate vector tiles for county boundaries")
 	minZoom := flag.Int("min-zoom", 13, "Minimum zoom level for tile generation")
 	maxZoom := flag.Int("max-zoom", 19, "Maximum zoom level for tile generation")
 
@@ -142,6 +144,28 @@ func main() {
 		}
 
 		log.Println("Tile generation completed successfully!")
+		os.Exit(0)
+	}
+
+	// Check if we should generate county boundary tiles
+	if *generateCountyTiles {
+		// Set up file logging if enabled
+		if *logging {
+			cleanup, err := utils.SetupFileLogger("counties", "tiles")
+			if err != nil {
+				log.Printf("Warning: Failed to set up file logging: %v", err)
+			} else {
+				defer cleanup()
+			}
+		}
+
+		log.Printf("Generating county boundary tiles (zoom %d-%d)...", *minZoom, *maxZoom)
+
+		if err := tiles.GenerateCountyTiles(db.DB, *minZoom, *maxZoom, *logging); err != nil {
+			log.Fatalf("ERROR: County tile generation failed: %v", err)
+		}
+
+		log.Println("County tile generation completed successfully!")
 		os.Exit(0)
 	}
 
@@ -345,14 +369,38 @@ func main() {
 		log.Fatalf("ERROR: Failed to initialize PMTiles cache: %v", err)
 	}
 
-	// Pre-warm PMTiles cache (first 100KB)
+	// Initialize county tiles cache and pre-warm with zoom 6-8 tiles
+	tiles.CountyTilesCache = &sync.Map{}
+	go func() {
+		var countyTiles []struct {
+			Z    int
+			X    int
+			Y    int
+			Data []byte
+		}
+		// Load zoom 6-8 county tiles (covers Georgia at most common view levels)
+		if err := db.DB.Raw(`
+			SELECT z, x, y, data FROM tiles 
+			WHERE layer = 'counties' AND z BETWEEN 6 AND 8
+		`).Scan(&countyTiles).Error; err != nil {
+			log.Printf("WARNING: Failed to pre-warm county tiles cache: %v", err)
+			return
+		}
+		for _, t := range countyTiles {
+			cacheKey := fmt.Sprintf("%d/%d/%d", t.Z, t.X, t.Y)
+			tiles.CountyTilesCache.Store(cacheKey, t.Data)
+		}
+		log.Printf("County tiles cache pre-warmed with %d tiles (zoom 6-8)", len(countyTiles))
+	}()
+
+	// Pre-warm PMTiles cache with commonly accessed ranges
 	go func() {
 		file, err := os.Open("./tiles/georgia.pmtiles")
 		if err != nil {
 			log.Printf("WARNING: Failed to open PMTiles for pre-warming: %v", err)
 			return
 		}
-			defer file.Close()
+		defer file.Close()
 
 		// Ranges from initial page load
 		ranges := []struct {
@@ -383,10 +431,10 @@ func main() {
 			}
 
 			headerRange := fmt.Sprintf("bytes=%d-%d", r.start, r.end)
-					if tiles.PMTilesCache != nil {
+			if tiles.PMTilesCache != nil {
 				atomic.AddUint64(&tiles.PMTilesSize, uint64(size))
 				tiles.PMTilesCache.Add(headerRange, data)
-					}
+			}
 		}
 
 		log.Printf("PMTiles cache pre-warmed with %d ranges", len(ranges))
@@ -398,15 +446,22 @@ func main() {
 	// Enable CORS for all origins (adjust as needed for production)
 	router.Use(cors.Default())
 
-	// Exclude GZIP compression for pre-compressed endpoints and binary files
-	router.Use(gzip.Gzip(
+	// Create gzip middleware
+	gzipMiddleware := gzip.Gzip(
 		gzip.DefaultCompression,
 		gzip.WithExcludedPaths([]string{
 			"/georgia.pmtiles",
-			"/api/counties/simplified",
-			"/api/counties/full",
 		}),
-	))
+	)
+
+	// Wrap gzip middleware to also exclude /api/tiles/ prefix (pre-compressed MVT tiles)
+	router.Use(func(c *gin.Context) {
+		if strings.HasPrefix(c.Request.URL.Path, "/api/tiles/") {
+			c.Next()
+			return
+		}
+		gzipMiddleware(c)
+	})
 
 	// Serve static files (index.html, app.js, etc.)
 	router.StaticFile("/", "./index.html")
@@ -432,12 +487,9 @@ func main() {
 	// Register API routes
 	api := router.Group("/api")
 	{
-		// County boundary endpoints (preloaded at startup)
-		api.GET("/counties/simplified", handlers.GetSimplifiedCountyBoundaries)
-		api.GET("/counties/full", handlers.GetFullCountyBoundaries)
-
-		// Vector tile endpoint for pre-generated MVT tiles
-		api.GET("/tiles/:z/:x/:y", handlers.GetVectorTile)
+		// Vector tile endpoints for pre-generated MVT tiles
+		api.GET("/tiles/:z/:x/:y", handlers.GetVectorTile)          // Parcel tiles
+		api.GET("/tiles/counties/:z/:x/:y", handlers.GetCountyTile) // County tiles
 
 		// Cache stats endpoint
 		api.GET("/cache/stats", handlers.GetCacheStats)
