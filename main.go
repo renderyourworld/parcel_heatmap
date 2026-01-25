@@ -348,32 +348,49 @@ func main() {
 	// Pre-warm PMTiles cache (first 100KB)
 	go func() {
 		file, err := os.Open("./tiles/georgia.pmtiles")
-		if err == nil {
-			defer file.Close()
-			limit := 100 * 1024
-			data := make([]byte, limit)
-			n, err := file.Read(data)
-			if err == nil || err == io.EOF {
-				if n > 0 {
-					headerRange := fmt.Sprintf("bytes=0-%d", n-1)
-					if tiles.PMTilesCache != nil {
-						atomic.AddUint64(&tiles.PMTilesSize, uint64(n))
-						tiles.PMTilesCache.Add(headerRange, data[:n])
-					}
-					log.Printf("PMTiles cache pre-warmed with first %d bytes", n)
-				}
-			} else {
-				log.Printf("WARNING: Failed to read PMTiles for pre-warming: %v", err)
-			}
-		} else {
+		if err != nil {
 			log.Printf("WARNING: Failed to open PMTiles for pre-warming: %v", err)
+			return
 		}
-	}()
+			defer file.Close()
 
-	// Preload county boundary data
-	if err := handlers.LoadCountyBoundaries(db.DB); err != nil {
-		log.Fatalf("ERROR: Failed to load county boundaries: %v", err)
-	}
+		// Ranges from initial page load
+		ranges := []struct {
+			start int64
+			end   int64
+		}{
+			{0, 16383},         // Header
+			{1595, 10967},      // Root directory
+			{1165912, 1234936}, // Tile data
+			{1234937, 1308328},
+			{1308329, 1442572},
+			{1442573, 1522203},
+			{1522204, 1615794},
+			{1615795, 1694735},
+			{1694736, 1789082},
+			{1789083, 1919147},
+			{1919148, 1956223},
+		}
+
+		for _, r := range ranges {
+			size := r.end - r.start + 1
+			data := make([]byte, size)
+
+			_, err := file.ReadAt(data, r.start)
+			if err != nil && err != io.EOF {
+				log.Printf("WARNING: Failed to pre-warm range %d-%d: %v", r.start, r.end, err)
+				continue
+			}
+
+			headerRange := fmt.Sprintf("bytes=%d-%d", r.start, r.end)
+					if tiles.PMTilesCache != nil {
+				atomic.AddUint64(&tiles.PMTilesSize, uint64(size))
+				tiles.PMTilesCache.Add(headerRange, data)
+					}
+		}
+
+		log.Printf("PMTiles cache pre-warmed with %d ranges", len(ranges))
+	}()
 
 	// Create a new Gin router
 	router := gin.Default()
