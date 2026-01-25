@@ -407,6 +407,11 @@ func main() {
 	router.StaticFile("/styles/dark.json", "./styles/dark.json")
 	router.GET("/georgia.pmtiles", handlers.ServePMTilesWithCache)
 
+	// Serve fonts and sprites with aggressive caching
+	router.Static("/fonts", "./static/fonts")
+	router.Static("/sprites", "./static/sprites")
+	router.Static("/lib", "./static/lib")
+
 	// Register API routes
 	api := router.Group("/api")
 	{
