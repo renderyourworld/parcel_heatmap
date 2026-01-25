@@ -130,6 +130,8 @@ async function loadMap() {
         transformRequest: (url) => {
             if (url.includes('/api/tiles/')) {
                 window._tileCount++;
+                if (!window._debugTileRequests) window._debugTileRequests = [];
+                window._debugTileRequests.push(url);
             }
             return { url };
         },

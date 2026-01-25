@@ -49,13 +49,13 @@ type SingleLayerMetric struct {
 	AvgLatencyMs  float64 `json:"avg_latency_ms"`  // Average individual request duration
 	RenderTimeMs  float64 `json:"render_time_ms"`  // ReadyTime - Network Span (approx)
 	ReadyTimeMs   float64 `json:"ready_time_ms"`   // Total time from nav start until visually ready
+	RequestCount  int     `json:"request_count"`   // Number of requests tracked
 }
 
 // LayerMetrics captures load times for individual data sources
 type LayerMetrics struct {
-	Protomaps          SingleLayerMetric `json:"protomaps"`
-	CountiesSimplified SingleLayerMetric `json:"counties_simplified"`
-	CountiesFull       SingleLayerMetric `json:"counties_full"`
+	Protomaps SingleLayerMetric `json:"protomaps"`
+	Counties  SingleLayerMetric `json:"counties"`
 }
 
 // BasemapMetrics tracks PMTiles request performance
@@ -202,7 +202,7 @@ func RunPerformanceBenchmark(url string) (*BenchmarkReport, error) {
 
 	// Category trackers (Global)
 	trackers := make(map[string]*netTracker)
-	for _, k := range []string{"protomaps", "counties-simplified", "counties-full", "parcels"} {
+	for _, k := range []string{"protomaps", "counties", "parcels"} {
 		trackers[k] = &netTracker{}
 	}
 
@@ -211,14 +211,13 @@ func RunPerformanceBenchmark(url string) (*BenchmarkReport, error) {
 		var category string
 
 		urlLower := strings.ToLower(url)
+		// Debug logging removed
 		if strings.Contains(urlLower, "georgia.pmtiles") {
 			category = "protomaps"
+		} else if strings.Contains(urlLower, "/api/tiles/counties/") {
+			category = "counties"
 		} else if strings.Contains(urlLower, "/api/tiles/") {
 			category = "parcels"
-		} else if strings.Contains(urlLower, "/api/counties/simplified") {
-			category = "counties-simplified"
-		} else if strings.Contains(urlLower, "/api/counties/full") {
-			category = "counties-full"
 		}
 
 		if category != "" {
@@ -309,7 +308,7 @@ func RunPerformanceBenchmark(url string) (*BenchmarkReport, error) {
 				if (!window._sourceReadyTimes) window._sourceReadyTimes = {};
 
 				var now = performance.now();
-				var layers = ['protomaps', 'counties-simplified', 'counties-full'];
+				var layers = ['protomaps', 'counties'];
 				
 				layers.forEach(function(id) {
 					// Source Ready: Data is loaded/parsed (roughly Network Finish)
@@ -371,6 +370,19 @@ func RunPerformanceBenchmark(url string) (*BenchmarkReport, error) {
 
 	log.Printf("Map fully rendered! captured initial metrics. Stabilizing for 2s...")
 	chromedp.Run(ctx, chromedp.Sleep(2*time.Second))
+
+	// Capture app-side request counts
+	var debugReqs []string
+	appReqCounts := make(map[string]int)
+	if err := chromedp.Run(ctx, chromedp.Evaluate("window._debugTileRequests || []", &debugReqs)); err == nil {
+		for _, r := range debugReqs {
+			if strings.Contains(r, "/api/tiles/counties/") {
+				appReqCounts["counties"]++
+			} else if strings.Contains(r, "/api/tiles/") {
+				appReqCounts["parcels"]++
+			}
+		}
+	}
 
 	// Clear tile stats and resource timings from Phase 1 so zoom level metrics are accurate
 	chromedp.Run(ctx, chromedp.Evaluate(`window._tileStats = []; performance.clearResourceTimings()`, nil))
@@ -447,7 +459,9 @@ func RunPerformanceBenchmark(url string) (*BenchmarkReport, error) {
 						const startTime = s.start;
 						const allResources = performance.getEntriesByType('resource');
 						const tileEntries = allResources.filter(r =>
-							r.name.includes('/api/tiles/') && r.responseEnd >= startTime
+							r.name.includes('/api/tiles/') && 
+							!r.name.includes('/api/tiles/counties/') && // Exclude county tiles from parcel metrics
+							r.responseEnd >= startTime
 						);
 
 						const count = tileEntries.length;
@@ -570,10 +584,17 @@ func RunPerformanceBenchmark(url string) (*BenchmarkReport, error) {
 	// and JS readiness (for when it actually showed up on map)
 	calcLayer := func(id, category string) SingleLayerMetric {
 		ready := getFloat(perfData, "layer_"+id+"_ready_ms")
+		sourceReady := getFloat(perfData, "source_"+id+"_ready_ms")
 
 		var m SingleLayerMetric
 		m.ReadyTimeMs = ready
 
+		// Use app-side count if available, otherwise fall back to net tracker
+		if count, ok := appReqCounts[category]; ok && count > 0 {
+			m.RequestCount = count
+		}
+
+		// Calculate timing from request log for Latency
 		mu.Lock()
 		var firstStart, lastEnd time.Time
 		var totalDur time.Duration
@@ -595,25 +616,37 @@ func RunPerformanceBenchmark(url string) (*BenchmarkReport, error) {
 		}
 		mu.Unlock()
 
-		if !firstStart.IsZero() && !lastEnd.IsZero() {
-			m.NetworkTimeMs = float64(lastEnd.Sub(firstStart).Milliseconds())
-		} else {
-			m.NetworkTimeMs = 0
+		if m.RequestCount == 0 {
+			m.RequestCount = count
 		}
+
+		// Use sourceReady for Network Time if available (more accurate for "Total Load Time")
+		if sourceReady > 0 {
+			m.NetworkTimeMs = sourceReady
+		} else if !firstStart.IsZero() && !lastEnd.IsZero() {
+			m.NetworkTimeMs = float64(lastEnd.Sub(firstStart).Milliseconds())
+		}
+
 		if count > 0 {
 			m.AvgLatencyMs = float64(totalDur.Milliseconds()) / float64(count)
+		} else {
+			// If CDP missed requests, we can't calculate latency per request
+			// But we confirm requests happened via m.RequestCount
 		}
 
 		m.RenderTimeMs = ready - m.NetworkTimeMs
 		if m.RenderTimeMs < 0 {
 			m.RenderTimeMs = 0
 		}
+		// If CDP missed requests but we have app counts, ensure we show count
+		if m.RequestCount == 0 && count > 0 {
+			m.RequestCount = count
+		}
 		return m
 	}
 
 	layerMetrics.Protomaps = calcLayer("protomaps", "protomaps")
-	layerMetrics.CountiesSimplified = calcLayer("counties-simplified", "counties-simplified")
-	layerMetrics.CountiesFull = calcLayer("counties-full", "counties-full")
+	layerMetrics.Counties = calcLayer("counties", "counties")
 
 	// Basemap Metrics - use tracker data which is populated by the event handler
 	pmTracker := trackers["protomaps"]
@@ -717,20 +750,17 @@ func PrintBenchmarkSummary(report *BenchmarkReport) {
 	fmt.Fprintf(w, "Avg Req Time:    %6.1f ms\n", report.Basemap.AvgDurationMs)
 
 	fmt.Fprintln(w, "\n--- Layer Performance (Network vs Render) ---")
-	fmt.Fprintf(w, "%-20s | %-12s | %-12s | %-12s | %-12s\n", "Layer", "Net Span", "Avg Latency", "Render/Wait", "Total Ready")
-	fmt.Fprintln(w, "-------------------------------------------------------------------------------------")
+	fmt.Fprintf(w, "%-20s | %-8s | %-12s | %-12s | %-12s | %-12s\n", "Layer", "Reqs", "Net Span", "Avg Latency", "Render/Wait", "Total Ready")
+	fmt.Fprintln(w, "---------------------------------------------------------------------------------------------------------")
 
 	printL := func(name string, m SingleLayerMetric) {
-		fmt.Fprintf(w, "%-20s | %8.1f ms | %8.1f ms | %8.1f ms | %8.1f ms\n",
-			name, m.NetworkTimeMs, m.AvgLatencyMs, m.RenderTimeMs, m.ReadyTimeMs)
+		fmt.Fprintf(w, "%-20s | %8d | %8.1f ms | %8.1f ms | %8.1f ms | %8.1f ms\n",
+			name, m.RequestCount, m.NetworkTimeMs, m.AvgLatencyMs, m.RenderTimeMs, m.ReadyTimeMs)
 	}
 
 	printL("Protomaps (Base)", report.LayerMetrics.Protomaps)
-	if report.LayerMetrics.CountiesSimplified.ReadyTimeMs > 0 {
-		printL("Counties (Simp)", report.LayerMetrics.CountiesSimplified)
-	}
-	if report.LayerMetrics.CountiesFull.ReadyTimeMs > 0 {
-		printL("Counties (Full)", report.LayerMetrics.CountiesFull)
+	if report.LayerMetrics.Counties.ReadyTimeMs > 0 {
+		printL("Counties (Vector)", report.LayerMetrics.Counties)
 	}
 
 	if len(report.ZoomMetrics) > 0 {
