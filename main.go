@@ -477,12 +477,11 @@ func main() {
 
 	router.StaticFile("/styles/light.json", "./styles/light.json")
 	router.StaticFile("/styles/dark.json", "./styles/dark.json")
-	router.GET("/georgia.pmtiles", handlers.ServePMTilesWithCache)
+	router.StaticFile("/styles/black.json", "./styles/black.json")
+	router.StaticFile("/styles/grayscale.json", "./styles/grayscale.json")
+	router.StaticFile("/styles/white.json", "./styles/white.json")
 
-	// // Serve fonts and sprites with aggressive caching
-	// router.Static("/fonts", "./static/fonts")
-	// router.Static("/sprites", "./static/sprites")
-	// router.Static("/lib", "./static/lib")
+	router.GET("/georgia.pmtiles", handlers.ServePMTilesWithCache)
 
 	// Serve lib files with aggressive caching
 	router.GET("/lib/*filepath", func(c *gin.Context) {

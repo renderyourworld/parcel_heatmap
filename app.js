@@ -2,6 +2,17 @@
 const GEORGIA_CENTER = [-83.6, 32.8]; // [lng, lat]
 const INITIAL_ZOOM = 7;
 
+// Available basemap styles
+const BASEMAP_STYLES = [
+    { id: 'light', name: 'Light', icon: '☀️' },
+    { id: 'dark', name: 'Dark', icon: '🌙' },
+    { id: 'black', name: 'Black', icon: '⬛' },
+    { id: 'white', name: 'White', icon: '⬜' },
+    { id: 'grayscale', name: 'Grayscale', icon: '🔘' }
+];
+
+let currentStyle = localStorage.getItem('mapStyle') || 'light'; // Load saved style or default
+
 // Setup PMTiles Protocol
 const protocol = new pmtiles.Protocol();
 maplibregl.addProtocol('pmtiles', protocol.tile);
@@ -13,7 +24,7 @@ function formatNumber(num) {
 }
 
 async function loadMap() {
-    const response = await fetch('/styles/light.json');
+    const response = await fetch(`/styles/${currentStyle}.json`);
     const data = await response.json();
     const basemapLayers = data.layers;
 
@@ -138,7 +149,7 @@ async function loadMap() {
         style: {
             version: 8,
             glyphs: '/fonts/{fontstack}/{range}.pbf',
-            sprite: `${window.location.origin}/sprites/v4/light`, // /v4/dark for dark mode
+            sprite: `${window.location.origin}/sprites/v4/${currentStyle}`,
             sources: {
                 'protomaps': {
                     type: 'vector',
@@ -165,6 +176,42 @@ async function loadMap() {
     });
 
     window.map = map; // Expose map for debugging
+
+    // Function to switch basemap styles
+    async function setMapStyle(styleId) {
+        if (styleId === currentStyle) return;
+
+        const response = await fetch(`/styles/${styleId}.json`);
+        const data = await response.json();
+        const newBasemapLayers = data.layers;
+
+        // Remove all existing basemap layers (layers from protomaps source that aren't our custom layers)
+        const currentLayers = map.getStyle().layers;
+        const customLayerIds = [...parcelLayers, ...countyLayers].map(l => l.id);
+
+        currentLayers.forEach(layer => {
+            if (!customLayerIds.includes(layer.id)) {
+                map.removeLayer(layer.id);
+            }
+        });
+
+        // Update the sprite
+        map.setSprite(`${window.location.origin}/sprites/v4/${styleId}`);
+
+        // Add new basemap layers at the bottom (before county layers)
+        const firstCountyLayerId = countyLayers[0].id;
+        newBasemapLayers.forEach(layer => {
+            map.addLayer(layer, firstCountyLayerId);
+        });
+
+        currentStyle = styleId;
+        localStorage.setItem('mapStyle', styleId); // Save preference
+
+        // Update UI to reflect current selection
+        document.querySelectorAll('.style-option').forEach(el => {
+            el.classList.toggle('active', el.dataset.style === styleId);
+        });
+    }
 
     // Add navigation controls
     map.addControl(new maplibregl.NavigationControl(), 'top-right');
@@ -298,67 +345,149 @@ async function loadMap() {
         }
     });
 
-    // Add controls container
-    const controls = document.createElement('div');
-    controls.style.cssText = `
-        position: absolute; 
-        bottom: 20px; 
-        left: 10px; 
-        background: rgba(255, 255, 255, 0.85); 
-        backdrop-filter: blur(8px);
-        padding: 12px; 
-        border-radius: 12px; 
-        box-shadow: 0 4px 15px rgba(0,0,0,0.15); 
-        border: 1px solid rgba(255,255,255,0.4);
-        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; 
-        z-index: 1000; 
-        display: flex; 
-        flex-direction: column; 
-        gap: 10px;
+    // Add Style Switcher UI (top-right, below navigation controls)
+    const styleSwitcher = document.createElement('div');
+    styleSwitcher.className = 'style-switcher';
+    styleSwitcher.style.cssText = `
+        position: absolute;
+        top: 100px;
+        right: 10px;
+        z-index: 1000;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
     `;
-    document.body.appendChild(controls);
 
-    // Add Tile Borders toggle
-    const borderToggleContainer = document.createElement('label');
-    borderToggleContainer.style.cssText = 'display: flex; align-items: center; gap: 10px; cursor: pointer; font-size: 14px; color: #1a1a1a; font-weight: 500;';
+    // Create the main button (compact layers icon)
+    const mainButton = document.createElement('button');
+    mainButton.className = 'style-main-btn';
+    mainButton.title = 'Change map style';
+    mainButton.style.cssText = `
+        background: #fff;
+        border: none;
+        border-radius: 4px;
+        width: 29px;
+        height: 29px;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        box-shadow: 0 0 0 2px rgba(0,0,0,0.1);
+        transition: background 0.15s ease;
+    `;
+    // Simple layers SVG icon
+    mainButton.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#333" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 7 12 12 22 7 12 2"></polygon><polyline points="2 17 12 22 22 17"></polyline><polyline points="2 12 12 17 22 12"></polyline></svg>`;
 
-    const borderCheckbox = document.createElement('input');
-    borderCheckbox.type = 'checkbox';
-    borderCheckbox.style.cssText = 'width: 16px; height: 16px; cursor: pointer; accent-color: #007BFF;';
-    borderCheckbox.addEventListener('change', (e) => {
-        map.showTileBoundaries = e.target.checked;
+    mainButton.addEventListener('mouseenter', () => {
+        mainButton.style.background = '#f4f4f4';
+    });
+    mainButton.addEventListener('mouseleave', () => {
+        mainButton.style.background = '#fff';
     });
 
-    const borderText = document.createElement('span');
-    borderText.textContent = 'Show Tile Borders';
+    // Create dropdown container
+    const dropdown = document.createElement('div');
+    dropdown.className = 'style-dropdown';
+    dropdown.style.cssText = `
+        position: absolute;
+        top: 0;
+        right: 38px;
+        background: #fff;
+        border-radius: 4px;
+        box-shadow: 0 0 0 2px rgba(0,0,0,0.1), 0 4px 12px rgba(0,0,0,0.15);
+        opacity: 0;
+        visibility: hidden;
+        transform: translateX(8px);
+        transition: all 0.15s ease;
+        overflow: hidden;
+        white-space: nowrap;
+    `;
 
-    borderToggleContainer.appendChild(borderCheckbox);
-    borderToggleContainer.appendChild(borderText);
-    controls.appendChild(borderToggleContainer);
+    // Add style options as compact horizontal buttons
+    const optionsRow = document.createElement('div');
+    optionsRow.style.cssText = 'display: flex; padding: 4px;';
 
-    // Add zoom level indicator
+    BASEMAP_STYLES.forEach(style => {
+        const option = document.createElement('button');
+        option.className = 'style-option';
+        option.dataset.style = style.id;
+        option.title = style.name;
+        const isActive = style.id === currentStyle;
+        option.style.cssText = `
+            width: 28px;
+            height: 28px;
+            border: none;
+            border-radius: 3px;
+            background: ${isActive ? 'rgba(0, 123, 255, 0.15)' : 'transparent'};
+            cursor: pointer;
+            font-size: 14px;
+            transition: all 0.1s ease;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        `;
+        option.textContent = style.icon;
+
+        option.addEventListener('mouseenter', () => {
+            if (style.id !== currentStyle) {
+                option.style.background = 'rgba(0, 0, 0, 0.05)';
+            }
+        });
+        option.addEventListener('mouseleave', () => {
+            option.style.background = style.id === currentStyle ? 'rgba(0, 123, 255, 0.15)' : 'transparent';
+        });
+        option.addEventListener('click', () => {
+            setMapStyle(style.id);
+            // Close dropdown
+            dropdown.style.opacity = '0';
+            dropdown.style.visibility = 'hidden';
+            dropdown.style.transform = 'translateX(8px)';
+        });
+
+        optionsRow.appendChild(option);
+    });
+
+    dropdown.appendChild(optionsRow);
+
+    // Toggle dropdown on click
+    mainButton.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const isVisible = dropdown.style.visibility === 'visible';
+        dropdown.style.opacity = isVisible ? '0' : '1';
+        dropdown.style.visibility = isVisible ? 'hidden' : 'visible';
+        dropdown.style.transform = isVisible ? 'translateX(8px)' : 'translateX(0)';
+    });
+
+    // Close dropdown when clicking outside
+    document.addEventListener('click', () => {
+        dropdown.style.opacity = '0';
+        dropdown.style.visibility = 'hidden';
+        dropdown.style.transform = 'translateX(8px)';
+    });
+
+    styleSwitcher.appendChild(mainButton);
+    styleSwitcher.appendChild(dropdown);
+    document.body.appendChild(styleSwitcher);
+
+    // Add zoom level indicator (top-right, below style switcher)
     const zoomDisplay = document.createElement('div');
     zoomDisplay.style.cssText = `
-        position: absolute; 
-        bottom: 20px; 
-        right: 10px; 
-        background: rgba(255, 255, 255, 0.85); 
-        backdrop-filter: blur(8px);
-        padding: 8px 16px; 
-        border-radius: 12px; 
-        box-shadow: 0 4px 15px rgba(0,0,0,0.15); 
-        border: 1px solid rgba(255,255,255,0.4);
-        font-weight: 600; 
-        font-size: 13px; 
-        color: #1a1a1a;
+        position: absolute;
+        top: 138px;
+        right: 10px;
+        background: #fff;
+        padding: 4px 8px;
+        border-radius: 4px;
+        box-shadow: 0 0 0 2px rgba(0,0,0,0.1);
+        font-weight: 500;
+        font-size: 11px;
+        color: #333;
         font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
         z-index: 1000;
     `;
-    zoomDisplay.textContent = `Zoom: ${Math.round(map.getZoom() * 10) / 10}`;
+    zoomDisplay.textContent = `Z${Math.round(map.getZoom() * 10) / 10}`;
     document.body.appendChild(zoomDisplay);
 
     map.on('zoom', () => {
-        zoomDisplay.textContent = `Zoom: ${Math.round(map.getZoom() * 10) / 10}`;
+        zoomDisplay.textContent = `Z${Math.round(map.getZoom() * 10) / 10}`;
     });
 
     // Debug: Log errors (filter out tile parsing errors for empty tiles)
