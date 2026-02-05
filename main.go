@@ -50,6 +50,7 @@ func main() {
 	benchmarkMode := flag.String("benchmark-mode", "desktop", "Benchmark mode: mobile or desktop")
 
 	logging := flag.Bool("log", false, "Enable logging to file in logs/ directory")
+	server := flag.Bool("server", false, "Run in web server mode with high connection pool")
 
 	flag.Parse()
 
@@ -57,7 +58,11 @@ func main() {
 	_ = godotenv.Load()
 
 	// Initialize the database connection
-	db.Connect()
+	if *server {
+		db.ConnectServer()
+	} else {
+		db.ConnectWorker()
+	}
 
 	// Check if we should run performance benchmark
 	if *benchmark {
@@ -278,8 +283,6 @@ func main() {
 					log.Printf("Warning: Failed to set up file logging: %v", err)
 				}
 			}
-
-			log.Printf("Starting parcel enrichment for %s county (resume=%v)", c, *resume)
 
 			// Start enrichment
 			if err := importers.StartParcelEnricher(db.DB, c, *resume, *maxParcels, *logging); err != nil {
