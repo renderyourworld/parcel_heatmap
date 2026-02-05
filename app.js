@@ -23,6 +23,43 @@ function formatNumber(num) {
     return Number(num).toLocaleString('en-US');
 }
 
+// Device detection
+function isMobile() {
+    return window.innerWidth < 768;
+}
+
+// Geolocation state
+let userLocationMarker = null;
+let userLocationAccuracy = null;
+let watchId = null;
+
+// Get user's location (returns promise with {center, zoom} or defaults)
+async function getUserLocation() {
+    const defaults = { center: GEORGIA_CENTER, zoom: INITIAL_ZOOM };
+
+    if (!navigator.geolocation) {
+        console.log('Geolocation not supported');
+        return defaults;
+    }
+
+    return new Promise((resolve) => {
+        navigator.geolocation.getCurrentPosition(
+            (position) => {
+                const lng = position.coords.longitude;
+                const lat = position.coords.latitude;
+                const zoom = isMobile() ? 16 : 12;
+                console.log(`Geolocation success: [${lng}, ${lat}], zoom: ${zoom}`);
+                resolve({ center: [lng, lat], zoom, accuracy: position.coords.accuracy });
+            },
+            (error) => {
+                console.log('Geolocation error:', error.message);
+                resolve(defaults);
+            },
+            { enableHighAccuracy: true, timeout: 5000, maximumAge: 60000 }
+        );
+    });
+}
+
 async function loadMap() {
     const response = await fetch(`/styles/${currentStyle}.json`);
     const data = await response.json();
@@ -129,13 +166,16 @@ async function loadMap() {
         }
     ];
 
+    // Get user location before initializing map
+    const userLocation = await getUserLocation();
+
     // Initialize the map
     window._tileCount = 0;
 
     const map = new maplibregl.Map({
         container: 'map',
-        center: GEORGIA_CENTER,
-        zoom: INITIAL_ZOOM,
+        center: userLocation.center,
+        zoom: userLocation.zoom,
         minZoom: 6,
         maxZoom: 19,
         transformRequest: (url) => {
@@ -215,6 +255,23 @@ async function loadMap() {
 
     // Add navigation controls
     map.addControl(new maplibregl.NavigationControl(), 'top-right');
+
+    // Add GeolocateControl for location tracking with custom positioning
+    const geolocateControl = new maplibregl.GeolocateControl({
+        positionOptions: { enableHighAccuracy: true },
+        trackUserLocation: true,
+        showUserLocation: true,
+        showAccuracyCircle: true,
+        showUserHeading: true  // Rotate map based on device compass/gyroscope
+    });
+    map.addControl(geolocateControl, 'top-right');
+
+    // If we got user location on init, trigger the geolocate after map loads
+    if (userLocation.accuracy) {
+        map.once('load', () => {
+            geolocateControl.trigger();
+        });
+    }
 
     // Track selected parcel (using feature_id as unique identifier across all counties)
     let selectedFeatureId = null;
@@ -350,7 +407,7 @@ async function loadMap() {
     styleSwitcher.className = 'style-switcher';
     styleSwitcher.style.cssText = `
         position: absolute;
-        top: 100px;
+        top: 150px;
         right: 10px;
         z-index: 1000;
         font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
@@ -471,7 +528,7 @@ async function loadMap() {
     const zoomDisplay = document.createElement('div');
     zoomDisplay.style.cssText = `
         position: absolute;
-        top: 138px;
+        top: 188px;
         right: 10px;
         background: #fff;
         padding: 4px 8px;

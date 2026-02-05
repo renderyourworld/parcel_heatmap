@@ -5,3 +5,7 @@ copilot-instructions.md
 *.pmtiles
 logs
 scripts
+.vscode/
+.claude/
+CLAUDE.md
+scraper
