@@ -80,29 +80,64 @@ func (tm *TokenManager) FetchNewToken() (string, int, error) {
 	ctx, cleanup := NewRandomizedBrowser()
 	defer cleanup()
 
-	log.Println("Launching programmatic browser to fetch token...")
+	log.Printf("Launching programmatic browser to fetch token from: %s", tm.GisApiUrl)
 
 	var qps string
 	var srid float64
 
+	// Navigate to the GIS page
 	err := chromedp.Run(ctx,
 		chromedp.Navigate(tm.GisApiUrl),
-		// Wait for the scripts to execute and mapConfig to be available
-		chromedp.Sleep(time.Duration(5+rand.Intn(6))*time.Second),
-		// Extract only the values we need to avoid circular reference issues
-		chromedp.Evaluate(`mapConfig.QPS`, &qps),
-		chromedp.Evaluate(`mapConfig.SRID || 2240`, &srid),
+		chromedp.WaitVisible(`body`, chromedp.ByQuery),
 	)
-
 	if err != nil {
-		return "", 0, fmt.Errorf("chromedp execution failed: %w", err)
+		return "", 0, fmt.Errorf("initial navigation failed: %w", err)
 	}
 
-	if qps == "" {
-		return "", 0, fmt.Errorf("QPS not found in mapConfig")
-	}
+	// Retry loop for extraction - handles page navigations (e.g. after Cloudflare)
+	// and flakiness during script initialization.
+	timeout := time.After(2 * time.Minute)
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
 
-	return qps, int(srid), nil
+	log.Println("Waiting for mapConfig.QPS to be available (solve Turnstile if prompted)...")
+
+	for {
+		select {
+		case <-ctx.Done():
+			return "", 0, fmt.Errorf("extraction timed out or context cancelled: %w", ctx.Err())
+		case <-timeout:
+			return "", 0, fmt.Errorf("extraction timed out after 2 minutes")
+		case <-ticker.C:
+			// Attempt to extract QPS and SRID
+			err := chromedp.Run(ctx,
+				chromedp.Evaluate(`window.mapConfig && window.mapConfig.QPS`, &qps),
+				chromedp.Evaluate(`window.mapConfig ? window.mapConfig.SRID || 2240 : 0`, &srid),
+			)
+
+			if err != nil {
+				// If the target navigated or closed, just log and retry
+				if strings.Contains(err.Error(), "-32000") || strings.Contains(err.Error(), "navigated") {
+					log.Printf("... Page navigated or busy, retrying extraction ...")
+					continue
+				}
+				// Other errors might be terminal
+				log.Printf("... Extraction error (retrying): %v", err)
+				continue
+			}
+
+			if qps != "" {
+				log.Printf("Successfully fetched token: %s (SRID: %.0f)", qps, srid)
+
+				// Add a small jittered wait before returning (to avoid closing browser too abruptly)
+				postFetchJitter := time.Duration(1000+rand.Intn(2000)) * time.Millisecond
+				log.Printf("... Waiting %.1fs before closing browser ...", postFetchJitter.Seconds())
+				time.Sleep(postFetchJitter)
+
+				return qps, int(srid), nil
+			}
+		}
+	}
 }
 
 // Returns a cached token or fetches a new one if needed
@@ -485,14 +520,21 @@ func NewRandomizedBrowser() (context.Context, context.CancelFunc) {
 		chromedp.WindowSize(windowWidth, windowHeight),
 		chromedp.Flag("disable-extensions", true),
 		chromedp.Flag("disable-sync", true),
+		chromedp.Flag("remote-debugging-port", "9222"),
+		chromedp.Flag("remote-debugging-address", "0.0.0.0"),
 	}
 
-	allocCtx, cancel := chromedp.NewExecAllocator(context.Background(), opts...)
-	ctx, cancel2 := chromedp.NewContext(allocCtx)
+	allocCtx, cancelAlloc := chromedp.NewExecAllocator(context.Background(), opts...)
+	ctx, cancelCtx := chromedp.NewContext(allocCtx)
+
+	// This ensures the browser won't stay open longer than 3 minutes total
+	// (Increased from 1 min to allow for manual Cloudflare intervention)
+	ctx, cancelTimeout := context.WithTimeout(ctx, 3*time.Minute)
 
 	cleanup := func() {
-		cancel2()
-		cancel()
+		cancelTimeout()
+		cancelCtx()
+		cancelAlloc()
 		os.RemoveAll(userDataDir)
 	}
 
@@ -716,17 +758,17 @@ func normalizeAddress(addr string) string {
 
 	// Normalize common abbreviations
 	replacements := map[string]string{
-		" ROAD":    " RD",
-		" STREET":  " ST",
-		" AVENUE":  " AVE",
-		" DRIVE":   " DR",
-		" LANE":    " LN",
-		" COURT":   " CT",
-		" CIRCLE":  " CIR",
-		" PLACE":   " PL",
-		" TERRACE": " TER",
-		" HIGHWAY": " HWY",
-		" PARKWAY": " PKWY",
+		" ROAD":      " RD",
+		" STREET":    " ST",
+		" AVENUE":    " AVE",
+		" DRIVE":     " DR",
+		" LANE":      " LN",
+		" COURT":     " CT",
+		" CIRCLE":    " CIR",
+		" PLACE":     " PL",
+		" TERRACE":   " TER",
+		" HIGHWAY":   " HWY",
+		" PARKWAY":   " PKWY",
 		" BOULEVARD": " BLVD",
 	}
 
@@ -845,15 +887,17 @@ func parseOwnerField(ownerContent, physicalAddress string) (ownerName, ownerAddr
 	return
 }
 
-// Parses QueryMapDetail HTML response to extract enrichment fields
-func parseQueryMapDetailHTML(htmlContent string) (*ParcelEnrichmentData, error) {
+// ParseQueryMapDetailHTML parses QueryMapDetail HTML response to extract enrichment fields.
+// Exported for standalone diagnostic scripts.
+func ParseQueryMapDetailHTML(htmlContent string) (*ParcelEnrichmentData, error) {
 	data := &ParcelEnrichmentData{}
 
 	// Pattern: <strong>Label</strong></td>\s*<td[^>]*>(.*?)</td>
-	classCodePattern := regexp.MustCompile(`(?i)<strong>Class\s*Code</strong></td>\s*<td[^>]*>(.*?)</td>`)
-	taxDistrictPattern := regexp.MustCompile(`(?i)<strong>Tax(?:ing)?\s*District</strong></td>\s*<td[^>]*>(.*?)</td>`)
-	physicalAddressPattern := regexp.MustCompile(`(?i)<strong>Physical\s*Address</strong></td>\s*<td[^>]*>(.*?)</td>`)
-	ownerPattern := regexp.MustCompile(`(?i)<strong>Owner</strong></td>\s*<td[^>]*>(.*?)</td>`)
+	// Robust patterns that handle &nbsp; and trailing spaces inside/outside tags
+	classCodePattern := regexp.MustCompile(`(?i)<strong>\s*(?:Class\s*Code|Class)(?:&nbsp;|\s)*</strong>\s*</td>\s*<td[^>]*>\s*(.*?)\s*</td>`)
+	taxDistrictPattern := regexp.MustCompile(`(?i)<strong>\s*(?:Tax(?:ing)?\s*District|District)(?:&nbsp;|\s)*</strong>\s*</td>\s*<td[^>]*>\s*(.*?)\s*</td>`)
+	physicalAddressPattern := regexp.MustCompile(`(?i)<strong>\s*(?:Physical\s*Address|Property\s*Address)(?:&nbsp;|\s)*</strong>\s*</td>\s*<td[^>]*>\s*(.*?)\s*</td>`)
+	ownerPattern := regexp.MustCompile(`(?i)<strong>\s*(?:Owner(?:\s*Address(?:&nbsp;|\s)*)?)(?:&nbsp;|\s)*</strong>\s*</td>\s*<td[^>]*>\s*(.*?)\s*</td>`)
 
 	// Extract Class Code
 	if match := classCodePattern.FindStringSubmatch(htmlContent); len(match) > 1 {
@@ -965,7 +1009,7 @@ func (ps *QPublicScraper) FetchParcelDetail(parcelKey string) (*ParcelEnrichment
 	}
 
 	// Parse HTML content
-	data, err := parseQueryMapDetailHTML(response.D)
+	data, err := ParseQueryMapDetailHTML(response.D)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse HTML: %w", err)
 	}
@@ -1007,8 +1051,9 @@ func updateParcelEnrichment(db *gorm.DB, countyID uint16, parcelID string, data 
 }
 
 // Enriches parcels for a QPublic county with QueryMapDetail data
-func startQPublicEnricher(gormDB *gorm.DB, county *models.County, resume bool, maxParcels int, logging bool) error {
-	log.Printf("Starting QPublic enricher for %s", county.Name)
+func startQPublicEnricher(gormDB *gorm.DB, county *models.County, resume bool, maxParcels int) error {
+	startTime := time.Now()
+	log.Printf("Starting QPublic enricher for %s County", county.Name)
 	log.Printf("Found county: %s (ID: %d, API: %s)", county.Name, county.ID, county.GisApiUrl.String)
 
 	// Extract LayerID from URL
@@ -1039,23 +1084,27 @@ func startQPublicEnricher(gormDB *gorm.DB, county *models.County, resume bool, m
 	log.Printf("Checkpoint initialized: last_processed_id=%d, status=%s",
 		checkpoint.LastProcessedID, checkpoint.Status)
 
-	// Initialize performance logger
-	perfLogger := utils.NewPerfLogger(logging)
-	if logging {
-		log.Println("Performance logging enabled for enrichment")
-	}
-
 	// Fetch total parcel count for progress tracking
+	// If resuming, count only remaining parcels (those not yet processed)
 	var totalParcels int64
-	if err := gormDB.Model(&models.Parcel{}).Where("county_id = ?", county.ID).Count(&totalParcels).Error; err != nil {
+	query := gormDB.Model(&models.Parcel{}).Where("county_id = ?", county.ID)
+	if resume {
+		query = query.Where("id > ?", uint64(checkpoint.LastProcessedID))
+	}
+	if err := query.Count(&totalParcels).Error; err != nil {
 		log.Printf("Warning: Could not fetch total count: %v. Continuing anyway...", err)
 		totalParcels = -1
 	} else {
-		log.Printf("Total parcels to enrich in county: %d", totalParcels)
+		if resume {
+			log.Printf("Resuming enrichment: %d parcels remaining in %s county", totalParcels, county.Name)
+		} else {
+			log.Printf("Total parcels to enrich in %s county: %d", county.Name, totalParcels)
+		}
 	}
 
 	successCount := 0
 	failCount := 0
+	forbiddenCount := 0
 	currentID := uint64(checkpoint.LastProcessedID)
 	stopEnrichment := false
 	const batchSize = 100 // Fetch parcels in batches from DB
@@ -1094,9 +1143,16 @@ func startQPublicEnricher(gormDB *gorm.DB, county *models.County, resume bool, m
 				// Check for 403/blocking errors
 				errStr := strings.ToLower(err.Error())
 				if strings.Contains(errStr, "403") || strings.Contains(errStr, "forbidden") {
-					log.Printf("CRITICAL: Got 403 for parcel %s. Stopping to avoid lockout.", parcel.ParcelID)
-					stopEnrichment = true
-					break
+					forbiddenCount++
+					if forbiddenCount >= 3 {
+						log.Printf("CRITICAL: Got 3x 403/forbidden errors. Stopping to avoid lockout (Last parcel: %s).", parcel.ParcelID)
+						stopEnrichment = true
+						break
+					}
+					log.Printf("Warning: Got 403 for parcel %s (attempt %d/3). Trying next parcel...", parcel.ParcelID, forbiddenCount)
+					failCount++
+					currentID = parcel.ID
+					continue
 				}
 
 				log.Printf("ERROR: Failed to fetch enrichment for parcel %s (ID %d): %v",
@@ -1116,19 +1172,21 @@ func startQPublicEnricher(gormDB *gorm.DB, county *models.County, resume bool, m
 
 			currentID = parcel.ID
 
-			// Update performance logger
-			perfLogger.Update(successCount, 10*time.Second)
+			// Log progress every 10 parcels
+			processed := successCount + failCount
+			if processed%10 == 0 {
+				percentage := 0.0
+				if totalParcels > 0 {
+					percentage = float64(processed) / float64(totalParcels) * 100.0
+				}
+				log.Printf("[%s] Progress: %d/%d (%.2f%%) - %d failed\n  Latest: %s: Owner=[%s], OwnerAddr=[%s], District=[%s], Class=[%s]",
+					county.Name, processed, totalParcels, percentage, failCount, parcel.ParcelID, enrichData.OwnerName, enrichData.OwnerAddress, enrichData.TaxDistrict, enrichData.ClassCode)
+			}
 		}
 
 		// Update checkpoint after batch
 		if err := updateCheckpoint(gormDB, county.Name, "qpublic_enrich", int64(currentID), successCount, failCount); err != nil {
 			log.Printf("Warning: Failed to update checkpoint: %v", err)
-		}
-
-		if totalParcels > 0 {
-			log.Printf("Progress: %d/%d enriched (%d failed)", successCount, totalParcels, failCount)
-		} else {
-			log.Printf("Progress: %d enriched (%d failed)", successCount, failCount)
 		}
 
 		if stopEnrichment {
@@ -1142,7 +1200,21 @@ func startQPublicEnricher(gormDB *gorm.DB, county *models.County, resume bool, m
 	}
 
 	log.Printf("QPublic enrichment complete! Total enriched: %d, Failed: %d", successCount, failCount)
-	perfLogger.LogFinal()
+
+	// Log performance summary
+	totalProcessed := successCount + failCount
+	if totalProcessed > 0 {
+		totalTime := time.Since(startTime)
+		tps := float64(totalProcessed) / totalTime.Seconds()
+		avgTimePerRecord := totalTime.Seconds() / float64(totalProcessed)
+
+		log.Println("========== PERFORMANCE SUMMARY ==========")
+		log.Printf("Total Records:      %d", totalProcessed)
+		log.Printf("Total Time:         %s", totalTime)
+		log.Printf("Avg TPS:            %.2f", tps)
+		log.Printf("Avg Time/Record:    %.5fs", avgTimePerRecord)
+		log.Println("=========================================")
+	}
 
 	return nil
 }

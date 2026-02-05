@@ -3,6 +3,7 @@ package importers
 import (
 	"fmt"
 	"log"
+	"os"
 	"strings"
 
 	"github.com/renderyourworld/parcel_heatmap/models"
@@ -37,7 +38,11 @@ func StartParcelImporter(gormDB *gorm.DB, countyName string, resume bool, maxPar
 // Main entry point for parcel enrichment.
 // Routes to QPublic enricher if county uses QPublic, otherwise returns error.
 func StartParcelEnricher(gormDB *gorm.DB, countyName string, resume bool, maxParcels int, logging bool) error {
-	log.Printf("Starting parcel enricher for %s (resume=%v)", countyName, resume)
+	// Override resume if the Env Var is present (maining for docker containters doing work)
+	if os.Getenv("RESUME") == "true" {
+		resume = true
+	}
+	log.Printf("Starting parcel enricher for %s county (resume=%v)", countyName, resume)
 
 	// Look up county
 	var county models.County
@@ -55,5 +60,5 @@ func StartParcelEnricher(gormDB *gorm.DB, countyName string, resume bool, maxPar
 	}
 
 	log.Printf("Detected QPublic URL - using QPublic enricher")
-	return startQPublicEnricher(gormDB, &county, resume, maxParcels, logging)
+	return startQPublicEnricher(gormDB, &county, resume, maxParcels)
 }
