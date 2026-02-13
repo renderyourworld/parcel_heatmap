@@ -21,6 +21,7 @@ type County struct {
 	// External API URLs for additional data sources
 	GisApiUrl          sql.NullString `gorm:"type:text"`
 	TaxApiUrl          sql.NullString `gorm:"type:text"`
+	TaxProvider        sql.NullString `gorm:"type:varchar(20)"`
 	IsGovernmentWindow bool           `gorm:"default:false"`
 	MaxRecordCount     uint32         `gorm:"type:int;default:1000"`
 
