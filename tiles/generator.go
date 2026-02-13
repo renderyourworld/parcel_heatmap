@@ -54,22 +54,19 @@ func flushBatch(ctx context.Context, batch *pgx.Batch, count int) error {
 // Returns gzipped MVT binary data
 func generateTile(db *gorm.DB, z, x, y int) ([]byte, error) {
 	// Use progressively smaller buffer at higher zoom levels to reduce duplicate labels
-	// At higher zooms, parcels are larger on screen and need less buffer
+	// At higher zooms, parcels are larger on screen and need less buffer.
+	// Keep a non-zero floor to avoid visible tile-edge seams from hard clipping.
 	buffer := 256
 	if z >= 17 {
 		buffer = 32
 	}
 	if z >= 18 {
-		buffer = 8
-	}
-	if z >= 19 {
-		buffer = 0
+		buffer = 16
 	}
 
 	query := `
-		SELECT ST_AsMVT(tile, 'parcels', 4096, 'geom') AS mvt
-		FROM (
-			SELECT 
+		WITH parcel_polygons AS (
+			SELECT
 				ST_AsMVTGeom(
 					p.geometry,  -- Geometry is already in 3857
 					ST_TileEnvelope($1, $2, $3),   -- Tile bounds in native 3857
@@ -79,7 +76,6 @@ func generateTile(db *gorm.DB, z, x, y int) ([]byte, error) {
 				) AS geom,
 				p.county_id || '_' || p.objectid AS feature_id,  -- Composite ID: unique across all counties
 				p.parcel_id,
-				p.site_number,
 				p.site_address,
 				p.owner_name,
 				p.owner_address,
@@ -92,8 +88,45 @@ func generateTile(db *gorm.DB, z, x, y int) ([]byte, error) {
 			LEFT JOIN parcel_class_codes cc ON p.county_id = cc.county_id AND p.classification = cc.code
 			WHERE p.geometry && ST_TileEnvelope($1, $2, $3)  -- Bbox check: both in 3857
 			  AND p.processed IS NULL
-		) AS tile
-		WHERE geom IS NOT NULL
+		),
+		parcel_label_points AS (
+			SELECT
+				ST_AsMVTGeom(
+					label_geom_3857,
+					ST_TileEnvelope($1, $2, $3),
+					4096,
+					0,
+					true
+				) AS geom,
+				feature_id,
+				site_number
+			FROM (
+				SELECT
+					p.county_id || '_' || p.objectid AS feature_id,
+					p.site_number,
+					ST_PointOnSurface(p.geometry) AS label_geom_3857
+				FROM parcels p
+				WHERE p.processed IS NULL
+				  AND p.site_number IS NOT NULL
+				  AND p.site_number <> ''
+				  AND p.geometry && ST_TileEnvelope($1, $2, $3)
+			) labels
+			WHERE FLOOR((ST_X(label_geom_3857) + 20037508.34) / (40075016.68 / POW(2, $1::int)))::int = $2
+			  AND FLOOR((20037508.34 - ST_Y(label_geom_3857)) / (40075016.68 / POW(2, $1::int)))::int = $3
+		)
+		SELECT
+			COALESCE(
+				(SELECT ST_AsMVT(parcel_polygons, 'parcels', 4096, 'geom')
+				 FROM parcel_polygons
+				 WHERE geom IS NOT NULL),
+				''::bytea
+			) ||
+			COALESCE(
+				(SELECT ST_AsMVT(parcel_label_points, 'parcel_labels', 4096, 'geom')
+				 FROM parcel_label_points
+				 WHERE geom IS NOT NULL),
+				''::bytea
+			) AS mvt
 	`
 
 	var mvtData []byte
@@ -120,8 +153,8 @@ func generateTile(db *gorm.DB, z, x, y int) ([]byte, error) {
 
 // Generates tiles using a worker pool and batches insertions
 func generateTilesWithWorkers(gormDB *gorm.DB, tiles []tileCoord, perfLogger *utils.PerfLogger) (storedCount, emptyCount, errorCount int) {
-	const numWorkers = 8
-	const batchSize = 50
+	const numWorkers = 24
+	const batchSize = 100
 
 	totalTiles := len(tiles)
 	tileChan := make(chan tileCoord, numWorkers*2)
@@ -318,15 +351,14 @@ func GenerateTilesForCounty(db *gorm.DB, countyID uint16, countyName string, min
 // Returns gzipped MVT binary data
 func generateCountyTile(db *gorm.DB, z, x, y int) ([]byte, error) {
 	query := `
-		SELECT ST_AsMVT(tile, 'counties', 4096, 'geom') AS mvt
-		FROM (
+		WITH county_polygons AS (
 			SELECT 
 				ST_AsMVTGeom(
-					ST_Transform(c.boundary, 3857),  -- Transform from 4326 to 3857
+					ST_Transform(c.boundary, 3857),
 					ST_TileEnvelope($1, $2, $3),
 					4096,
-					256,  -- buffer pixels
-					true  -- clip geometry to tile bounds
+					256,
+					true
 				) AS geom,
 				c.id,
 				c.name,
@@ -337,8 +369,41 @@ func generateCountyTile(db *gorm.DB, z, x, y int) ([]byte, error) {
 				c.square_miles
 			FROM counties c
 			WHERE ST_Transform(c.boundary, 3857) && ST_TileEnvelope($1, $2, $3)
-		) AS tile
-		WHERE geom IS NOT NULL
+		),
+		county_label_points AS (
+			SELECT
+				ST_AsMVTGeom(
+					label_geom_3857,
+					ST_TileEnvelope($1, $2, $3),
+					4096,
+					0,
+					true
+				) AS geom,
+				id,
+				name
+			FROM (
+				SELECT
+					c.id,
+					c.name,
+					ST_Transform(COALESCE(c.centroid, ST_PointOnSurface(c.boundary)), 3857) AS label_geom_3857
+				FROM counties c
+			) labels
+			WHERE FLOOR((ST_X(label_geom_3857) + 20037508.34) / (40075016.68 / POW(2, $1::int)))::int = $2
+			  AND FLOOR((20037508.34 - ST_Y(label_geom_3857)) / (40075016.68 / POW(2, $1::int)))::int = $3
+		)
+		SELECT
+			COALESCE(
+				(SELECT ST_AsMVT(county_polygons, 'counties', 4096, 'geom')
+				 FROM county_polygons
+				 WHERE geom IS NOT NULL),
+				''::bytea
+			) ||
+			COALESCE(
+				(SELECT ST_AsMVT(county_label_points, 'county_labels', 4096, 'geom')
+				 FROM county_label_points
+				 WHERE geom IS NOT NULL),
+				''::bytea
+			) AS mvt
 	`
 
 	var mvtData []byte

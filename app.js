@@ -23,15 +23,240 @@ function formatNumber(num) {
     return Number(num).toLocaleString('en-US');
 }
 
+function getPopupTheme(currentStyle) {
+    const darkTheme = currentStyle === 'dark' || currentStyle === 'black';
+    return darkTheme
+        ? {
+            bg: 'rgba(18, 24, 32, 0.97)',
+            text: '#e8edf3',
+            muted: '#b7c4d1',
+            border: 'rgba(255,255,255,0.08)',
+            shadow: '0 10px 24px rgba(0,0,0,0.45)'
+        }
+        : {
+            bg: 'rgba(255, 255, 255, 0.98)',
+            text: '#18222d',
+            muted: '#526170',
+            border: 'rgba(0,0,0,0.08)',
+            shadow: '0 10px 24px rgba(0,0,0,0.16)'
+        };
+}
+
+function createPopupHTML({ currentStyle, title, accent, rows, maxWidth = 320 }) {
+    const t = getPopupTheme(currentStyle);
+    const mobile = isMobile();
+    const labelColWidth = mobile ? 78 : 96;
+    const rowPadY = mobile ? 4 : 5;
+    const titleSize = mobile ? 14 : 15;
+    const bodySize = mobile ? 12 : 13;
+    const cardPadTop = mobile ? 10 : 12;
+    const cardPadSide = mobile ? 10 : 12;
+    const cardPadBottom = mobile ? 7 : 8;
+    const mobileCap = Math.min(maxWidth, 320);
+    const effectiveMaxWidth = mobile
+        ? `min(${mobileCap}px, calc(100vw - 24px))`
+        : `${maxWidth}px`;
+
+    const rowHTML = rows.map(r => `
+        <div style="display:grid; grid-template-columns: ${labelColWidth}px 1fr; column-gap:10px; padding:${rowPadY}px 0; border-bottom:1px solid ${t.border};">
+            <div style="font-weight:600; color:${t.text};">${r.label}</div>
+            <div style="color:${t.muted};">${r.value}</div>
+        </div>
+    `).join('');
+
+    return `
+        <div style="
+            font-family: 'Noto Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+            max-width:${effectiveMaxWidth};
+            font-size:${bodySize}px;
+            color:${t.text};
+            background:${t.bg};
+            border:1px solid ${t.border};
+            border-radius:12px;
+            box-shadow:${t.shadow};
+            padding:${cardPadTop}px ${cardPadSide}px ${cardPadBottom}px ${cardPadSide}px;
+            backdrop-filter: blur(2px);
+        ">
+            <div style="
+                margin:0 0 10px 0;
+                font-size:${titleSize}px;
+                font-weight:700;
+                letter-spacing:0.01em;
+                padding-bottom:8px;
+                border-bottom:2px solid ${accent};
+                color:${t.text};
+            ">${title}</div>
+            <div>${rowHTML}</div>
+        </div>
+    `;
+}
+
+function ensurePopupBaseStyles() {
+    if (document.getElementById('custom-map-popup-styles')) return;
+
+    const style = document.createElement('style');
+    style.id = 'custom-map-popup-styles';
+    style.textContent = `
+        .maplibregl-popup-content {
+            background: transparent !important;
+            padding: 0 !important;
+            box-shadow: none !important;
+            border-radius: 0 !important;
+        }
+        .maplibregl-popup-tip {
+            border-top-color: transparent !important;
+            border-bottom-color: transparent !important;
+        }
+        .maplibregl-popup-close-button {
+            color: #7f8ea0;
+            font-size: 16px;
+            right: 6px;
+            top: 4px;
+            line-height: 1;
+            width: 28px;
+            height: 28px;
+            display: grid;
+            place-items: center;
+            border-radius: 8px;
+        }
+        .maplibregl-popup-close-button:hover {
+            color: #c4ced8;
+            background: rgba(127, 142, 160, 0.12);
+        }
+    `;
+    document.head.appendChild(style);
+}
+
 // Device detection
 function isMobile() {
     return window.innerWidth < 768;
 }
 
-// Geolocation state
-let userLocationMarker = null;
-let userLocationAccuracy = null;
-let watchId = null;
+// Compass rotation — rotates the map bearing to match the phone's compass heading.
+// Uses DeviceOrientation API and sets bearing directly on MapLibre's transform
+// to avoid conflicts with user gestures (zoom, pan).
+const compass = {
+    state: 'OFF', // 'OFF' | 'COMPASS'
+    heading: null,
+    _handler: null,
+    _raf: null,
+    _permitted: false,
+
+    isAvailable() {
+        return 'DeviceOrientationEvent' in window || 'ondeviceorientationabsolute' in window;
+    },
+
+    async requestPermission() {
+        if (this._permitted) return;
+        // iOS 13+ requires explicit permission on user gesture
+        if (typeof DeviceOrientationEvent !== 'undefined' &&
+            typeof DeviceOrientationEvent.requestPermission === 'function') {
+            try {
+                const result = await DeviceOrientationEvent.requestPermission();
+                this._permitted = (result === 'granted');
+            } catch (err) {
+                console.log('Compass permission denied:', err);
+            }
+        } else {
+            this._permitted = true;
+        }
+    },
+
+    _eventToHeading(event) {
+        // iOS Safari provides webkitCompassHeading directly (degrees CW from north)
+        if (event.webkitCompassHeading != null) return event.webkitCompassHeading;
+        // Android / standard: alpha is degrees CCW from north
+        if (event.alpha != null) return (360 - event.alpha) % 360;
+        return null;
+    },
+
+    start(map) {
+        if (this._handler) return;
+
+        let pending = null;
+        const self = this;
+
+        this._handler = function(event) {
+            const heading = self._eventToHeading(event);
+            if (heading === null) return;
+            pending = heading;
+
+            if (!self._raf) {
+                self._raf = requestAnimationFrame(function() {
+                    self._raf = null;
+                    if (self.state !== 'COMPASS' || pending === null) return;
+                    self.heading = pending;
+                    map.transform.setBearing(pending);
+                    map.fire('rotate');
+                    map.triggerRepaint();
+                });
+            }
+        };
+
+        if ('ondeviceorientationabsolute' in window) {
+            window.addEventListener('deviceorientationabsolute', this._handler);
+        } else {
+            window.addEventListener('deviceorientation', this._handler);
+        }
+        this.state = 'COMPASS';
+    },
+
+    stop() {
+        if (this._handler) {
+            window.removeEventListener('deviceorientationabsolute', this._handler);
+            window.removeEventListener('deviceorientation', this._handler);
+            this._handler = null;
+        }
+        if (this._raf) {
+            cancelAnimationFrame(this._raf);
+            this._raf = null;
+        }
+        this.heading = null;
+        this.state = 'OFF';
+    }
+};
+
+// Set up compass-based map rotation tied to the GeolocateControl lifecycle.
+// - Replaces _updateCamera with direct transform calls (avoids canceling gestures)
+// - Auto-starts compass when tracking is active (ACTIVE_LOCK)
+// - Stops compass on user drag or when tracking ends
+function setupCompassTracking(map, geolocateControl) {
+    if (!compass.isAvailable()) return;
+
+    // _updateCamera is only called in ACTIVE_LOCK state. We replace the default
+    // fitBounds() implementation which fires events and cancels ongoing animations.
+    geolocateControl._updateCamera = function(position) {
+        this._map.transform.setCenter(new maplibregl.LngLat(
+            position.coords.longitude,
+            position.coords.latitude
+        ));
+        this._map.triggerRepaint();
+
+        // Auto-start compass when entering ACTIVE_LOCK
+        if (compass.state === 'OFF' && compass._permitted) {
+            compass.start(this._map);
+        }
+    };
+
+    // Request permission eagerly so it's ready before the first compass start
+    geolocateControl.on('trackuserlocationstart', () => {
+        compass.requestPermission();
+    });
+
+    // Stop compass when user drags (control transitions to BACKGROUND)
+    map.on('dragstart', (e) => {
+        if (e.originalEvent && compass.state === 'COMPASS') {
+            compass.stop();
+        }
+    });
+
+    // Stop compass when tracking ends entirely
+    geolocateControl.on('trackuserlocationend', () => {
+        if (compass.state === 'COMPASS') {
+            compass.stop();
+        }
+    });
+}
 
 // Get user's location (returns promise with {center, zoom} or defaults)
 async function getUserLocation() {
@@ -61,6 +286,8 @@ async function getUserLocation() {
 }
 
 async function loadMap() {
+    ensurePopupBaseStyles();
+
     const response = await fetch(`/styles/${currentStyle}.json`);
     const data = await response.json();
     const basemapLayers = data.layers;
@@ -74,8 +301,12 @@ async function loadMap() {
             'source-layer': 'parcels',
             minzoom: 13,
             paint: {
-                'fill-color': ['case', ['boolean', ['feature-state', 'selected'], false], '#ff6b6b', '#3388ff'],
-                'fill-opacity': ['case', ['boolean', ['feature-state', 'selected'], false], 0.6, 0.05]
+                'fill-color': ['case', ['boolean', ['feature-state', 'selected'], false], '#e4572e', '#2f6ea9'],
+                'fill-opacity': ['interpolate', ['linear'], ['zoom'],
+                    13, ['case', ['boolean', ['feature-state', 'selected'], false], 0.42, 0.03],
+                    16, ['case', ['boolean', ['feature-state', 'selected'], false], 0.42, 0.06],
+                    19, ['case', ['boolean', ['feature-state', 'selected'], false], 0.42, 0.09]
+                ]
             }
         },
         {
@@ -87,24 +318,30 @@ async function loadMap() {
             paint: {
                 'line-color': [
                     'case',
-                    ['boolean', ['feature-state', 'selected'], false], '#ff0000',
+                    ['boolean', ['feature-state', 'selected'], false], '#e4572e',
                     ['has', 'class_color'], ['get', 'class_color'],
-                    '#3388ff'
+                    '#2f6ea9'
                 ],
-                'line-width': ['case', ['boolean', ['feature-state', 'selected'], false], 2, 1]
+                'line-width': ['interpolate', ['linear'], ['zoom'],
+                    13, ['case', ['boolean', ['feature-state', 'selected'], false], 2.2, 0.6],
+                    16, ['case', ['boolean', ['feature-state', 'selected'], false], 2.2, 1],
+                    19, ['case', ['boolean', ['feature-state', 'selected'], false], 2.2, 1.3]
+                ],
+                'line-opacity': 0.9
             }
         },
         {
             id: 'parcel-labels',
             type: 'symbol',
             source: 'parcels',
-            'source-layer': 'parcels',
+            'source-layer': 'parcel_labels',
             minzoom: 15,
             layout: {
                 'text-field': ['get', 'site_number'],
-                'text-size': 10,
+                'text-size': ['interpolate', ['linear'], ['zoom'], 15, 8, 17, 9.5, 19, 11],
                 'text-font': ['Noto Sans Regular'],
                 'text-anchor': 'center',
+                'text-padding': 2,
                 'symbol-avoid-edges': true,
                 'symbol-z-order': 'auto',
                 'symbol-placement': 'point',
@@ -113,9 +350,10 @@ async function loadMap() {
                 'text-optional': true
             },
             paint: {
-                'text-color': '#333333',
+                'text-color': '#23313d',
                 'text-halo-color': '#ffffff',
-                'text-halo-width': 1.5
+                'text-halo-width': 1.2,
+                'text-halo-blur': 0.3
             }
         }
     ];
@@ -130,10 +368,15 @@ async function loadMap() {
             paint: {
                 'line-color': [
                     'case',
-                    ['boolean', ['feature-state', 'selected'], false], '#ff0000',
-                    '#007BFF'
+                    ['boolean', ['feature-state', 'selected'], false], '#e4572e',
+                    '#5f88a6'
                 ],
-                'line-width': ['case', ['boolean', ['feature-state', 'selected'], false], 2, 1]
+                'line-width': ['interpolate', ['linear'], ['zoom'],
+                    6, ['case', ['boolean', ['feature-state', 'selected'], false], 2.2, 0.7],
+                    9, ['case', ['boolean', ['feature-state', 'selected'], false], 2.2, 0.9],
+                    12, ['case', ['boolean', ['feature-state', 'selected'], false], 2.2, 1.2]
+                ],
+                'line-opacity': ['interpolate', ['linear'], ['zoom'], 6, 0.55, 9, 0.72, 12, 0.88]
             }
         },
         {
@@ -143,25 +386,31 @@ async function loadMap() {
             'source-layer': 'counties',
             maxzoom: 13,
             paint: {
-                'fill-color': '#88C0D0',
-                'fill-opacity': 0.4
+                'fill-color': '#7fb3d5',
+                'fill-opacity': ['interpolate', ['linear'], ['zoom'], 6, 0.12, 9, 0.08, 12.5, 0.02, 13, 0]
             }
         },
         {
             id: 'county-labels',
             type: 'symbol',
             source: 'counties',
-            'source-layer': 'counties',
+            'source-layer': 'county_labels',
             maxzoom: 13,
             layout: {
                 'text-field': ['get', 'name'],
-                'text-size': 12,
+                'text-size': ['interpolate', ['linear'], ['zoom'], 6, 10, 9, 12.5, 12, 14],
                 'text-font': ['Noto Sans Regular'],
                 'text-anchor': 'center',
-                'text-letter-spacing': 0.05
+                'text-letter-spacing': 0.04,
+                'text-padding': 3,
+                'symbol-avoid-edges': true,
+                'text-allow-overlap': false
             },
             paint: {
-                'text-color': '#000000'
+                'text-color': '#1f2a33',
+                'text-halo-color': 'rgba(255,255,255,0.9)',
+                'text-halo-width': 1.1,
+                'text-halo-blur': 0.35
             }
         }
     ];
@@ -178,6 +427,7 @@ async function loadMap() {
         zoom: userLocation.zoom,
         minZoom: 6,
         maxZoom: 19,
+        crossSourceCollisions: false,
         transformRequest: (url) => {
             if (url.includes('/api/tiles/')) {
                 window._tileCount++;
@@ -217,6 +467,25 @@ async function loadMap() {
 
     window.map = map; // Expose map for debugging
 
+    // Keep label contrast appropriate for each basemap family.
+    function applyOverlayTheme(styleId) {
+        const darkTheme = styleId === 'dark' || styleId === 'black';
+        const countyTextColor = darkTheme ? '#e9f0f6' : '#1f2a33';
+        const countyHaloColor = darkTheme ? 'rgba(10, 16, 24, 0.95)' : 'rgba(255,255,255,0.9)';
+        const parcelTextColor = darkTheme ? '#edf3f8' : '#23313d';
+        const parcelHaloColor = darkTheme ? 'rgba(10, 16, 24, 0.95)' : '#ffffff';
+
+        map.setPaintProperty('county-labels', 'text-color', countyTextColor);
+        map.setPaintProperty('county-labels', 'text-halo-color', countyHaloColor);
+        map.setPaintProperty('county-labels', 'text-halo-width', darkTheme ? 1.4 : 1.1);
+        map.setPaintProperty('county-labels', 'text-halo-blur', darkTheme ? 0.45 : 0.35);
+
+        map.setPaintProperty('parcel-labels', 'text-color', parcelTextColor);
+        map.setPaintProperty('parcel-labels', 'text-halo-color', parcelHaloColor);
+        map.setPaintProperty('parcel-labels', 'text-halo-width', darkTheme ? 1.4 : 1.2);
+        map.setPaintProperty('parcel-labels', 'text-halo-blur', darkTheme ? 0.4 : 0.3);
+    }
+
     // Function to switch basemap styles
     async function setMapStyle(styleId) {
         if (styleId === currentStyle) return;
@@ -246,12 +515,17 @@ async function loadMap() {
 
         currentStyle = styleId;
         localStorage.setItem('mapStyle', styleId); // Save preference
+        applyOverlayTheme(styleId);
 
         // Update UI to reflect current selection
         document.querySelectorAll('.style-option').forEach(el => {
             el.classList.toggle('active', el.dataset.style === styleId);
         });
     }
+
+    map.on('load', () => {
+        applyOverlayTheme(currentStyle);
+    });
 
     // Add navigation controls
     map.addControl(new maplibregl.NavigationControl(), 'top-right');
@@ -262,11 +536,16 @@ async function loadMap() {
         trackUserLocation: true,
         showUserLocation: true,
         showAccuracyCircle: true,
-        showUserHeading: true  // Rotate map based on device compass/gyroscope
+        showUserHeading: true  // Show heading arrow on user dot
     });
     map.addControl(geolocateControl, 'top-right');
 
-    // If we got user location on init, trigger the geolocate after map loads
+    // Wire up compass rotation to the GeolocateControl.
+    // Replaces the default fitBounds()-based camera update with direct transform
+    // calls so compass bearing updates don't cancel zoom/pan gestures.
+    setupCompassTracking(map, geolocateControl);
+
+    // Auto-trigger geolocate if we detected user location on init
     if (userLocation.accuracy) {
         map.once('load', () => {
             geolocateControl.trigger();
@@ -300,22 +579,21 @@ async function loadMap() {
 
         // Create popup content
         const props = feature.properties;
-        const popupHTML = `
-            <div style="font-family: sans-serif; max-width: 300px;">
-                <h3 style="margin: 0 0 10px 0; font-size: 14px; border-bottom: 2px solid #3388ff; padding-bottom: 5px;">
-                    ${props.site_address || `Parcel: ${props.parcel_id}`}
-                </h3>
-                <table style="width: 100%; font-size: 12px;">
-                    <tr><td style="padding: 3px 5px 3px 0; font-weight: bold;">Parcel ID:</td><td style="padding: 3px 0;">${props.parcel_id || 'N/A'}</td></tr>
-                    <tr><td style="padding: 3px 5px 3px 0; font-weight: bold;">Address:</td><td style="padding: 3px 0;">${props.site_address || 'N/A'}</td></tr>
-                    <tr><td style="padding: 3px 5px 3px 0; font-weight: bold;">Owner:</td><td style="padding: 3px 0;">${props.owner_name || 'N/A'}</td></tr>
-                    <tr><td style="padding: 3px 5px 3px 0; font-weight: bold;">Owner Address:</td><td style="padding: 3px 0;">${props.owner_address || 'N/A'}</td></tr>
-                    <tr><td style="padding: 3px 5px 3px 0; font-weight: bold;">Acres:</td><td style="padding: 3px 0;">${props.acres || 'N/A'}</td></tr>
-                    <tr><td style="padding: 3px 5px 3px 0; font-weight: bold;">Class:</td><td style="padding: 3px 0;">${props.category || 'N/A'} (${props.classification || 'N/A'})</td></tr>
-                    <tr><td style="padding: 3px 5px 3px 0; font-weight: bold;">Tax District:</td><td style="padding: 3px 0;">${props.tax_district || 'N/A'}</td></tr>
-                </table>
-            </div>
-        `;
+        const popupHTML = createPopupHTML({
+            currentStyle,
+            title: props.site_address || `Parcel ${props.parcel_id || ''}`,
+            accent: '#2f6ea9',
+            maxWidth: 360,
+            rows: [
+                { label: 'Parcel ID', value: props.parcel_id || 'N/A' },
+                { label: 'Address', value: props.site_address || 'N/A' },
+                { label: 'Owner', value: props.owner_name || 'N/A' },
+                { label: 'Owner Addr', value: props.owner_address || 'N/A' },
+                { label: 'Acres', value: props.acres || 'N/A' },
+                { label: 'Class', value: `${props.category || 'N/A'} (${props.classification || 'N/A'})` },
+                { label: 'Tax Dist', value: props.tax_district || 'N/A' }
+            ]
+        });
 
         // Show popup
         new maplibregl.Popup()
@@ -346,19 +624,18 @@ async function loadMap() {
         );
 
         const props = feature.properties;
-        const popupHTML = `
-            <div style="font-family: sans-serif; max-width: 250px;">
-                <h3 style="margin: 0 0 10px 0; font-size: 14px; border-bottom: 2px solid #007BFF; padding-bottom: 5px;">
-                    ${props.name} County, ${props.state || 'GA'}
-                </h3>
-                <table style="width: 100%; font-size: 12px;">
-                    <tr><td style="padding: 3px 5px 3px 0; font-weight: bold;">Population:</td><td style="padding: 3px 0;">${formatNumber(props.population)}</td></tr>
-                    <tr><td style="padding: 3px 5px 3px 0; font-weight: bold;">Region:</td><td style="padding: 3px 0;">${props.region || 'N/A'}</td></tr>
-                    <tr><td style="padding: 3px 5px 3px 0; font-weight: bold;">Acres:</td><td style="padding: 3px 0;">${formatNumber(props.acres)}</td></tr>
-                    <tr><td style="padding: 3px 5px 3px 0; font-weight: bold;">Sq. Miles:</td><td style="padding: 3px 0;">${formatNumber(props.square_miles)}</td></tr>
-                </table>
-            </div>
-        `;
+        const popupHTML = createPopupHTML({
+            currentStyle,
+            title: `${props.name} County, ${props.state || 'GA'}`,
+            accent: '#5f88a6',
+            maxWidth: 280,
+            rows: [
+                { label: 'Population', value: formatNumber(props.population) },
+                { label: 'Region', value: props.region || 'N/A' },
+                { label: 'Acres', value: formatNumber(props.acres) },
+                { label: 'Sq. Miles', value: formatNumber(props.square_miles) }
+            ]
+        });
         new maplibregl.Popup().setLngLat(e.lngLat).setHTML(popupHTML).addTo(map);
     });
 
