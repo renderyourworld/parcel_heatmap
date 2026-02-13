@@ -41,7 +41,7 @@ When a user loads the map, data flows through multiple optimized layers:
 flowchart TD
     subgraph Startup["Server Startup"]
         S1[Initialize caches] --> S2[Pre-warm PMTiles header]
-        S1 --> S3[Preload county boundaries]
+        S1 --> S3[Initialize county tile cache]
     end
 
     subgraph Client["Browser"]
@@ -50,11 +50,10 @@ flowchart TD
     end
 
     subgraph Initial["Initial Load"]
-        C --> D[Fetch County Boundaries]
+        C --> D[Fetch County Boundary Tiles]
         C --> E[Load PMTiles Basemap]
-        D --> F["GET /api/counties/simplified"]
-        S3 -.->|Already in memory| F
-        F --> G[GeoJSON Response]
+        D --> F["GET /api/tiles/counties/z/x/y"]
+        F --> G[Vector Tile Response]
         G --> H[Render Counties]
     end
 
@@ -76,7 +75,7 @@ flowchart TD
 
 ### Key Data Flow Points
 
-1. **County Boundaries**: Pre-serialized as GeoJSON in the database, served directly without per-request geometry conversion
+1. **County Boundaries**: Pre-generated MVT vector tiles, served directly from PostgreSQL with in-memory tile caching
 2. **Basemap**: OSM data served via PMTiles with range-request caching
 3. **Vector Tiles**: Pre-generated MVT tiles stored gzipped in PostgreSQL, cached in an LRU after first access
 4. **Parcel Properties**: Embedded in vector tiles, no additional API calls needed on click

@@ -58,6 +58,7 @@ erDiagram
         numeric square_miles
         text gis_api_url
         text tax_api_url
+        varchar(20) tax_provider
         integer max_record_count
         boolean is_government_window
     }
@@ -161,6 +162,7 @@ Stores Georgia county boundaries and associated metadata. This is the foundation
 | `square_miles` | `numeric` | Total land area in square miles |
 | `gis_api_url` | `text` | ArcGIS REST API endpoint for parcel data |
 | `tax_api_url` | `text` | Tax data API endpoint |
+| `tax_provider` | `varchar(20)` | Tax data provider (GovWindow, Wildfire, etc.) |
 | `max_record_count` | `integer` | API pagination limit (default: 1000) |
 | `is_government_window` | `boolean` | Whether county uses Government Window tax platform |
 
