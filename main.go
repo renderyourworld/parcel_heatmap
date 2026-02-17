@@ -510,6 +510,8 @@ func main() {
 		// Vector tile endpoints for pre-generated MVT tiles
 		api.GET("/tiles/:z/:x/:y", handlers.GetVectorTile)          // Parcel tiles
 		api.GET("/tiles/counties/:z/:x/:y", handlers.GetCountyTile) // County tiles
+		api.GET("/parcels/:feature_id", handlers.GetParcelDetails)   // Live parcel details for popup hydration
+		api.GET("/search/parcels", handlers.SearchParcels)           // Parcel address search/autocomplete
 
 		// Cache stats endpoint
 		api.GET("/cache/stats", handlers.GetCacheStats)

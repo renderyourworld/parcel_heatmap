@@ -78,7 +78,8 @@ flowchart TD
 1. **County Boundaries**: Pre-generated MVT vector tiles, served directly from PostgreSQL with in-memory tile caching
 2. **Basemap**: OSM data served via PMTiles with range-request caching
 3. **Vector Tiles**: Pre-generated MVT tiles stored gzipped in PostgreSQL, cached in an LRU after first access
-4. **Parcel Properties**: Embedded in vector tiles, no additional API calls needed on click
+4. **Parcel Properties**: Lightweight fields are embedded in vector tiles; full parcel details hydrate on click via `/api/parcels/:feature_id`
+5. **Search**: Address/owner autocomplete queries PostgreSQL via `/api/search/parcels`, then `flyTo` + parcel highlight + popup hydration
 
 ---
 
@@ -106,7 +107,7 @@ The application uses PostgreSQL with the PostGIS extension for spatial data. The
 |-------|---------|---------|
 | `counties` | Georgia county boundaries and metadata | 159 |
 | `parcels` | Individual property parcels with geometry | ~4.77M |
-| `parcel_taxes` | Historical tax records per parcel | Growing |
+| `parcel_taxes` | Historical tax records + bill detail fields per parcel/year | Growing |
 | `tiles` | Pre-generated MVT vector tiles | ~48M |
 | `county_field_mappings` | Maps source API fields to our schema | Variable |
 | `parcel_class_codes` | Land use classification codes per county | Variable |
@@ -138,19 +139,54 @@ The application uses PostgreSQL with the PostGIS extension for spatial data. The
 3. **Gzip Storage**: Tiles stored compressed, decompressed only when served (or cached uncompressed)
 4. **Zoom-based Detail**: Simplified geometries at low zoom, full detail only when needed
 
+### Parcel Tile Payload Optimization
+
+Parcel polygon tiles were optimized by trimming embedded attributes to only the fields needed for map rendering:
+
+- `feature_id`
+- `site_address`
+- `acres`
+
+Detailed parcel fields are now fetched on click from a live endpoint (`/api/parcels/:feature_id`) and used to hydrate the popup. This dramatically reduced tile payload size and improved map pan/zoom responsiveness.
+
+| Zoom | Before | After |
+|:----:|-------:|------:|
+| 13 | 307 kB | 30 kB |
+| 14 | 93 kB | 9,203 B |
+| 15 | 29 kB | 2,923 B |
+| 16 | 9,458 B | 1,036 B |
+| 17 | 3,151 B | 425 B |
+| 18 | 1,275 B | 246 B |
+| 19 | 679 B | 182 B |
+
+### Search Optimization
+
+The map includes a single search bar with mode toggle (`Address` / `Owner`) for fast parcel lookup:
+
+- **Endpoint**: `/api/search/parcels?q=...&mode=address|owner&limit=10`
+- **Strategy**: prefix match first, trigram similarity fallback for longer queries
+- **Scope**: Georgia parcels only
+- **Result behavior**: selecting a result flies to the parcel, highlights it, and opens the hydrated parcel popup
+
+Database-side search performance improvements:
+
+- `pg_trgm` extension for fuzzy matching
+- Precomputed `search_lat` / `search_lng` columns on `parcels` (trigger-maintained on geometry changes)
+- Partial prefix + trigram indexes aligned to active search filters (`processed IS NULL`, `objectid IS NOT NULL`, non-null coords/text)
+
 ### Tile Cache Configuration
 
 The application uses a **zoom-aware LRU cache** with ~200MB total memory budget. Lower zoom levels receive more cache space because they contain more data per tile and are more expensive to regenerate:
 
 | Zoom | Memory Quota | Avg Tile Size | ~Tile Capacity |
 |:----:|-------------:|--------------:|---------------:|
-| 13 | 90 MB | 43 KB | ~2,100 tiles |
-| 14 | 48 MB | 13 KB | ~3,700 tiles |
-| 15 | 32 MB | 4.2 KB | ~7,600 tiles |
-| 16 | 16 MB | 1.6 KB | ~10,000 tiles |
-| 17 | 8 MB | 713 B | ~11,200 tiles |
-| 18 | 4 MB | 450 B | ~8,900 tiles |
-| 19 | 2 MB | 355 B | ~5,600 tiles |
+| 13 | 90 MB | 30 KB | ~3,100 tiles |
+| 14 | 48 MB | 9,203 B | ~5,500 tiles |
+| 15 | 32 MB | 2,923 B | ~11,500 tiles |
+| 16 | 16 MB | 1,036 B | ~16,200 tiles |
+| 17 | 8 MB | 425 B | ~19,700 tiles |
+| 18 | 4 MB | 246 B | ~17,100 tiles |
+| 19 | 2 MB | 182 B | ~11,500 tiles |
 
 This design ensures that the most expensive tiles (low zoom with many parcels) stay cached longer, while high-zoom tiles with fewer parcels are evicted more aggressively since they're cheap to regenerate.
 
@@ -212,6 +248,8 @@ parcel_heatmap/
 │
 ├── handlers/
 │   ├── county.go        # County boundary API endpoints
+│   ├── parcel.go        # Live parcel detail endpoint for popup hydration
+|   +-- search.go        # Parcel address/owner search endpoint
 │   └── tiles.go         # Vector tile serving with caching
 │
 ├── importers/
@@ -238,3 +276,5 @@ parcel_heatmap/
 - **[OpenStreetMap](https://www.openstreetmap.org/)** - Map data
 - **[PostGIS](https://postgis.net/)** - Spatial database capabilities
 - **[MapLibre GL JS](https://maplibre.org/)** - Map rendering
+
+

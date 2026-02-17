@@ -23,6 +23,23 @@ function formatNumber(num) {
     return Number(num).toLocaleString('en-US');
 }
 
+function formatLocalDateTime(value) {
+    if (!value) return 'N/A';
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return 'N/A';
+    return date.toLocaleString();
+}
+
+function escapeHtml(str) {
+    if (str === null || str === undefined) return '';
+    return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
 function getPopupTheme(currentStyle) {
     const darkTheme = currentStyle === 'dark' || currentStyle === 'black';
     return darkTheme
@@ -42,7 +59,7 @@ function getPopupTheme(currentStyle) {
         };
 }
 
-function createPopupHTML({ currentStyle, title, accent, rows, maxWidth = 320 }) {
+function createPopupHTML({ currentStyle, title, accent, rows, maxWidth = 320, footerText = '', footerHtml = '' }) {
     const t = getPopupTheme(currentStyle);
     const mobile = isMobile();
     const labelColWidth = mobile ? 78 : 96;
@@ -63,6 +80,12 @@ function createPopupHTML({ currentStyle, title, accent, rows, maxWidth = 320 }) 
             <div style="color:${t.muted};">${r.value}</div>
         </div>
     `).join('');
+    let footerBlock = '';
+    if (footerHtml) {
+        footerBlock = `<div style="margin-top:8px; font-size:${mobile ? 11 : 11.5}px; color:${t.muted}; opacity:0.95;">${footerHtml}</div>`;
+    } else if (footerText) {
+        footerBlock = `<div style="margin-top:8px; font-size:${mobile ? 11 : 11.5}px; color:${t.muted}; opacity:0.9;">${footerText}</div>`;
+    }
 
     return `
         <div style="
@@ -87,8 +110,38 @@ function createPopupHTML({ currentStyle, title, accent, rows, maxWidth = 320 }) 
                 color:${t.text};
             ">${title}</div>
             <div>${rowHTML}</div>
+            ${footerBlock}
         </div>
     `;
+}
+
+function toNumberOrNull(value) {
+    if (value === null || value === undefined || value === '') return null;
+    const n = Number(value);
+    return Number.isFinite(n) ? n : null;
+}
+
+function buildParcelFooter({ currentStyle, lat, lng, updatedAt }) {
+    const t = getPopupTheme(currentStyle);
+    const parsedLat = toNumberOrNull(lat);
+    const parsedLng = toNumberOrNull(lng);
+    const hasCoords = parsedLat !== null && parsedLng !== null;
+    const mapsHref = hasCoords
+        ? `https://www.google.com/maps?q=${parsedLat.toFixed(6)},${parsedLng.toFixed(6)}`
+        : '';
+    const linkColor = t.muted;
+    const updatedLine = `Last Updated At: ${formatLocalDateTime(updatedAt)}`;
+
+    const mapsLine = hasCoords
+        ? `<a href="${mapsHref}" target="_blank" rel="noopener noreferrer" style="display:inline-flex; align-items:center; gap:6px; color:${linkColor}; text-decoration:none; margin-bottom:6px;">
+                <svg width="13" height="13" viewBox="0 0 24 24" aria-hidden="true" style="display:block;">
+                    <path fill="currentColor" d="M12 2a7 7 0 0 0-7 7c0 5.25 7 13 7 13s7-7.75 7-13a7 7 0 0 0-7-7zm0 9.25A2.25 2.25 0 1 1 12 6.75a2.25 2.25 0 0 1 0 4.5z"/>
+                </svg>
+                <span>Open in Google Maps</span>
+           </a>`
+        : '';
+
+    return `${mapsLine}<div>${updatedLine}</div>`;
 }
 
 function ensurePopupBaseStyles() {
@@ -122,6 +175,187 @@ function ensurePopupBaseStyles() {
         .maplibregl-popup-close-button:hover {
             color: #c4ced8;
             background: rgba(127, 142, 160, 0.12);
+        }
+        .popup-skeleton-line {
+            display: inline-block;
+            height: 10px;
+            border-radius: 999px;
+            background: linear-gradient(90deg, rgba(140,155,170,0.18) 25%, rgba(190,205,220,0.38) 50%, rgba(140,155,170,0.18) 75%);
+            background-size: 200% 100%;
+            animation: popupShimmer 1.2s ease-in-out infinite;
+            vertical-align: middle;
+        }
+        .popup-skeleton-short { width: 72px; }
+        .popup-skeleton-medium { width: 120px; }
+        .popup-skeleton-long { width: 165px; }
+        @keyframes popupShimmer {
+            0% { background-position: 200% 0; }
+            100% { background-position: -200% 0; }
+        }
+    `;
+    document.head.appendChild(style);
+}
+
+function ensureSearchStyles() {
+    if (document.getElementById('map-search-styles')) return;
+
+    const style = document.createElement('style');
+    style.id = 'map-search-styles';
+    style.textContent = `
+        .map-search {
+            position: absolute;
+            top: 12px;
+            left: 12px;
+            z-index: 1100;
+            width: 360px;
+            font-family: 'Noto Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+        }
+        .map-search-input-wrap {
+            display: grid;
+            grid-template-columns: 1fr auto;
+            align-items: center;
+            gap: 8px;
+            background: rgba(255, 255, 255, 0.96);
+            border: 1px solid rgba(0, 0, 0, 0.12);
+            border-radius: 12px;
+            padding: 8px 10px;
+            box-shadow: 0 8px 20px rgba(0, 0, 0, 0.15);
+            backdrop-filter: blur(2px);
+        }
+        .map-search-input {
+            border: none;
+            outline: none;
+            width: 100%;
+            font-size: 16px;
+            background: transparent;
+            color: #192532;
+        }
+        .map-search-clear {
+            width: 24px;
+            height: 24px;
+            border: none;
+            border-radius: 6px;
+            background: transparent;
+            color: #6f7f91;
+            cursor: pointer;
+            font-size: 18px;
+            line-height: 1;
+            display: grid;
+            place-items: center;
+        }
+        .map-search-clear:hover {
+            background: rgba(0, 0, 0, 0.08);
+        }
+        .map-search-results {
+            margin-top: 8px;
+            background: rgba(255, 255, 255, 0.98);
+            border: 1px solid rgba(0, 0, 0, 0.12);
+            border-radius: 12px;
+            box-shadow: 0 10px 24px rgba(0, 0, 0, 0.18);
+            overflow: hidden;
+            display: none;
+            max-height: 340px;
+            overflow-y: auto;
+        }
+        .map-search-item {
+            display: block;
+            width: 100%;
+            text-align: left;
+            border: none;
+            background: transparent;
+            padding: 10px 12px;
+            border-bottom: 1px solid rgba(0, 0, 0, 0.08);
+            cursor: pointer;
+        }
+        .map-search-item:last-child {
+            border-bottom: none;
+        }
+        .map-search-item:hover,
+        .map-search-item.active {
+            background: rgba(47, 110, 169, 0.10);
+        }
+        .map-search-line1 {
+            font-size: 14px;
+            color: #16222f;
+        }
+        .map-search-line2 {
+            margin-top: 2px;
+            font-size: 12px;
+            color: #5c6b7a;
+        }
+        .map-search-empty {
+            padding: 12px;
+            font-size: 13px;
+            color: #5c6b7a;
+        }
+        .map-search-modes {
+            margin-top: 6px;
+            display: inline-flex;
+            gap: 4px;
+            padding: 3px;
+            border-radius: 10px;
+            background: rgba(255, 255, 255, 0.92);
+            border: 1px solid rgba(0, 0, 0, 0.10);
+        }
+        .map-search-mode {
+            border: none;
+            border-radius: 8px;
+            padding: 4px 10px;
+            font-size: 12px;
+            color: #4e5d6d;
+            background: transparent;
+            cursor: pointer;
+        }
+        .map-search-mode.active {
+            color: #ffffff;
+            background: #2f6ea9;
+        }
+        body.map-theme-dark .map-search-input-wrap,
+        body.map-theme-dark .map-search-results {
+            background: rgba(18, 24, 32, 0.96);
+            border-color: rgba(255, 255, 255, 0.12);
+        }
+        body.map-theme-dark .map-search-modes {
+            background: rgba(18, 24, 32, 0.96);
+            border-color: rgba(255, 255, 255, 0.12);
+        }
+        body.map-theme-dark .map-search-mode {
+            color: #c2cdda;
+        }
+        body.map-theme-dark .map-search-mode.active {
+            color: #ffffff;
+            background: #4f88bf;
+        }
+        body.map-theme-dark .map-search-input {
+            color: #e7edf3;
+        }
+        body.map-theme-dark .map-search-line1 {
+            color: #e7edf3;
+        }
+        body.map-theme-dark .map-search-line2,
+        body.map-theme-dark .map-search-empty,
+        body.map-theme-dark .map-search-clear {
+            color: #b5c3d1;
+        }
+        body.map-theme-dark .map-search-item {
+            border-bottom-color: rgba(255, 255, 255, 0.08);
+        }
+        body.map-theme-dark .map-search-item:hover,
+        body.map-theme-dark .map-search-item.active {
+            background: rgba(81, 144, 209, 0.18);
+        }
+        body.map-theme-dark .map-search-clear:hover {
+            background: rgba(255, 255, 255, 0.08);
+        }
+        @media (max-width: 767px) {
+            .map-search {
+                left: 10px;
+                right: 56px;
+                width: auto;
+            }
+            .map-search-input {
+                font-size: 15px;
+            }
         }
     `;
     document.head.appendChild(style);
@@ -287,6 +521,7 @@ async function getUserLocation() {
 
 async function loadMap() {
     ensurePopupBaseStyles();
+    ensureSearchStyles();
 
     const response = await fetch(`/styles/${currentStyle}.json`);
     const data = await response.json();
@@ -425,7 +660,7 @@ async function loadMap() {
         container: 'map',
         center: userLocation.center,
         zoom: userLocation.zoom,
-        minZoom: 6,
+        minZoom: 5,
         maxZoom: 19,
         crossSourceCollisions: false,
         transformRequest: (url) => {
@@ -467,6 +702,269 @@ async function loadMap() {
 
     window.map = map; // Expose map for debugging
 
+    // Track selected features for map highlighting.
+    let selectedFeatureId = null;
+    let selectedCountyId = null;
+    let activePopup = null;
+    let geolocateControl = null;
+    const parcelDetailsCache = new Map();
+
+    function clearActivePopup() {
+        if (activePopup) {
+            activePopup.remove();
+            activePopup = null;
+        }
+    }
+
+    function setActivePopup(popup) {
+        clearActivePopup();
+        activePopup = popup;
+        popup.on('close', () => {
+            if (activePopup === popup) {
+                activePopup = null;
+            }
+        });
+    }
+
+    function clearMapSelection() {
+        if (selectedFeatureId !== null) {
+            map.setFeatureState(
+                { source: 'parcels', sourceLayer: 'parcels', id: selectedFeatureId },
+                { selected: false }
+            );
+            selectedFeatureId = null;
+        }
+        if (selectedCountyId !== null) {
+            map.setFeatureState(
+                { source: 'counties', sourceLayer: 'counties', id: selectedCountyId },
+                { selected: false }
+            );
+            selectedCountyId = null;
+        }
+    }
+
+    function stopSearchFlyTrackingConflicts() {
+        // Keep search flyTo behavior consistent with manual pan: break heading lock.
+        if (compass.state === 'COMPASS') {
+            compass.stop();
+        }
+
+        // ACTIVE_LOCK can fight flyTo animation; toggle it off using control internals.
+        if (geolocateControl && geolocateControl._watchState === 'ACTIVE_LOCK') {
+            if (typeof geolocateControl._onControlClick === 'function') {
+                geolocateControl._onControlClick();
+            } else if (geolocateControl._geolocateButton) {
+                geolocateControl._geolocateButton.click();
+            }
+        }
+    }
+
+    // Address search UI (DB-backed autocomplete).
+    const searchContainer = document.createElement('div');
+    searchContainer.className = 'map-search';
+    searchContainer.innerHTML = `
+        <div class="map-search-input-wrap">
+            <input class="map-search-input" type="text" placeholder="Search Georgia address..." autocomplete="off" />
+            <button class="map-search-clear" title="Clear search" aria-label="Clear search">&times;</button>
+        </div>
+        <div class="map-search-modes">
+            <button class="map-search-mode active" data-mode="address">Address</button>
+            <button class="map-search-mode" data-mode="owner">Owner</button>
+        </div>
+        <div class="map-search-results"></div>
+    `;
+    document.body.appendChild(searchContainer);
+
+    const searchInput = searchContainer.querySelector('.map-search-input');
+    const searchClear = searchContainer.querySelector('.map-search-clear');
+    const searchResults = searchContainer.querySelector('.map-search-results');
+    const searchModeButtons = searchContainer.querySelectorAll('.map-search-mode');
+
+    let searchItems = [];
+    let searchActiveIndex = -1;
+    let searchDebounceTimer = null;
+    let searchAbortController = null;
+    let lastSearchQuery = '';
+    let searchMode = 'address';
+
+    function closeSearchResults() {
+        searchResults.style.display = 'none';
+        searchResults.innerHTML = '';
+        searchItems = [];
+        searchActiveIndex = -1;
+    }
+
+    function openSearchResults() {
+        searchResults.style.display = 'block';
+    }
+
+    function renderSearchResults() {
+        if (!searchItems.length) {
+            searchResults.innerHTML = '<div class="map-search-empty">No matching Georgia parcels found.</div>';
+            openSearchResults();
+            return;
+        }
+
+        searchResults.innerHTML = searchItems.map((item, idx) => `
+            <button class="map-search-item ${idx === searchActiveIndex ? 'active' : ''}" data-idx="${idx}">
+                <div class="map-search-line1">${
+                    searchMode === 'owner'
+                        ? escapeHtml(item.owner_name || 'Unknown Owner')
+                        : escapeHtml(item.site_address || 'Unknown Address')
+                }</div>
+                <div class="map-search-line2">${
+                    searchMode === 'owner'
+                        ? `${escapeHtml(item.site_address || 'Unknown Address')} · ${escapeHtml(item.county_name || 'Unknown County')} County, Georgia`
+                        : `${escapeHtml(item.county_name || 'Unknown County')} County, Georgia`
+                }</div>
+            </button>
+        `).join('');
+        openSearchResults();
+    }
+
+    function flyToSearchResult(item) {
+        if (!item) return;
+        clearActivePopup();
+        clearMapSelection();
+        stopSearchFlyTrackingConflicts();
+
+        if (item.feature_id) {
+            selectedFeatureId = item.feature_id;
+        }
+
+        map.flyTo({
+            center: [item.lng, item.lat],
+            zoom: Math.max(map.getZoom(), 18),
+            speed: 1.2,
+            curve: 1.4
+        });
+        if (item.feature_id) {
+            map.once('moveend', () => {
+                map.setFeatureState(
+                    { source: 'parcels', sourceLayer: 'parcels', id: item.feature_id },
+                    { selected: true }
+                );
+                openParcelPopupFromSearch(item);
+            });
+        }
+        searchInput.value = item.site_address || '';
+        closeSearchResults();
+    }
+
+    async function runAddressSearch(query) {
+        const trimmed = query.trim();
+        if (trimmed.length < 2) {
+            lastSearchQuery = '';
+            closeSearchResults();
+            return;
+        }
+        const normalized = trimmed.toLowerCase().replace(/\s+/g, ' ');
+        if (normalized === lastSearchQuery) {
+            return;
+        }
+        lastSearchQuery = normalized;
+
+        if (searchAbortController) {
+            searchAbortController.abort();
+        }
+        searchAbortController = new AbortController();
+
+        try {
+            const response = await fetch(`/api/search/parcels?q=${encodeURIComponent(trimmed)}&limit=10&mode=${encodeURIComponent(searchMode)}`, {
+                method: 'GET',
+                signal: searchAbortController.signal
+            });
+            if (!response.ok) {
+                throw new Error(`Search failed (${response.status})`);
+            }
+
+            const payload = await response.json();
+            searchItems = Array.isArray(payload.results) ? payload.results : [];
+            searchActiveIndex = searchItems.length ? 0 : -1;
+            renderSearchResults();
+        } catch (err) {
+            if (err.name === 'AbortError') return;
+            searchItems = [];
+            searchActiveIndex = -1;
+            searchResults.innerHTML = '<div class="map-search-empty">Search unavailable right now.</div>';
+            openSearchResults();
+        }
+    }
+
+    searchInput.addEventListener('input', () => {
+        if (searchDebounceTimer) {
+            clearTimeout(searchDebounceTimer);
+        }
+        searchDebounceTimer = setTimeout(() => {
+            runAddressSearch(searchInput.value);
+        }, 280);
+    });
+
+    searchModeButtons.forEach((btn) => {
+        btn.addEventListener('click', () => {
+            const nextMode = btn.dataset.mode;
+            if (nextMode === searchMode) return;
+            searchMode = nextMode;
+            searchInput.placeholder = searchMode === 'owner' ? 'Search Georgia owner...' : 'Search Georgia address...';
+            lastSearchQuery = '';
+            searchModeButtons.forEach((el) => {
+                el.classList.toggle('active', el.dataset.mode === searchMode);
+            });
+            runAddressSearch(searchInput.value);
+        });
+    });
+
+    searchInput.addEventListener('keydown', (e) => {
+        if (!searchItems.length) {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                runAddressSearch(searchInput.value);
+            }
+            if (e.key === 'Escape') {
+                closeSearchResults();
+            }
+            return;
+        }
+
+        if (e.key === 'ArrowDown') {
+            e.preventDefault();
+            searchActiveIndex = (searchActiveIndex + 1) % searchItems.length;
+            renderSearchResults();
+        } else if (e.key === 'ArrowUp') {
+            e.preventDefault();
+            searchActiveIndex = (searchActiveIndex - 1 + searchItems.length) % searchItems.length;
+            renderSearchResults();
+        } else if (e.key === 'Enter') {
+            e.preventDefault();
+            const idx = searchActiveIndex >= 0 ? searchActiveIndex : 0;
+            flyToSearchResult(searchItems[idx]);
+        } else if (e.key === 'Escape') {
+            e.preventDefault();
+            closeSearchResults();
+        }
+    });
+
+    searchResults.addEventListener('click', (e) => {
+        const button = e.target.closest('.map-search-item');
+        if (!button) return;
+        const idx = Number(button.dataset.idx);
+        if (Number.isNaN(idx) || idx < 0 || idx >= searchItems.length) return;
+        flyToSearchResult(searchItems[idx]);
+    });
+
+    searchClear.addEventListener('click', () => {
+        searchInput.value = '';
+        lastSearchQuery = '';
+        closeSearchResults();
+        searchInput.focus();
+    });
+
+    document.addEventListener('click', (e) => {
+        if (!searchContainer.contains(e.target)) {
+            closeSearchResults();
+        }
+    });
+
     // Keep label contrast appropriate for each basemap family.
     function applyOverlayTheme(styleId) {
         const darkTheme = styleId === 'dark' || styleId === 'black';
@@ -484,6 +982,7 @@ async function loadMap() {
         map.setPaintProperty('parcel-labels', 'text-halo-color', parcelHaloColor);
         map.setPaintProperty('parcel-labels', 'text-halo-width', darkTheme ? 1.4 : 1.2);
         map.setPaintProperty('parcel-labels', 'text-halo-blur', darkTheme ? 0.4 : 0.3);
+        document.body.classList.toggle('map-theme-dark', darkTheme);
     }
 
     // Function to switch basemap styles
@@ -531,7 +1030,7 @@ async function loadMap() {
     map.addControl(new maplibregl.NavigationControl(), 'top-right');
 
     // Add GeolocateControl for location tracking with custom positioning
-    const geolocateControl = new maplibregl.GeolocateControl({
+    geolocateControl = new maplibregl.GeolocateControl({
         positionOptions: { enableHighAccuracy: true },
         trackUserLocation: true,
         showUserLocation: true,
@@ -545,19 +1044,120 @@ async function loadMap() {
     // calls so compass bearing updates don't cancel zoom/pan gestures.
     setupCompassTracking(map, geolocateControl);
 
-    // Auto-trigger geolocate if we detected user location on init
+    // Auto-trigger geolocate if we detected user location on init.
     if (userLocation.accuracy) {
         map.once('load', () => {
             geolocateControl.trigger();
         });
     }
 
-    // Track selected parcel (using feature_id as unique identifier across all counties)
-    let selectedFeatureId = null;
-    let selectedCountyId = null;
+    async function fetchParcelDetails(featureId) {
+        if (parcelDetailsCache.has(featureId)) {
+            return parcelDetailsCache.get(featureId);
+        }
+
+        const response = await fetch(`/api/parcels/${encodeURIComponent(featureId)}`);
+        if (!response.ok) {
+            throw new Error(`Parcel lookup failed (${response.status})`);
+        }
+
+        const details = await response.json();
+        parcelDetailsCache.set(featureId, details);
+        return details;
+    }
+
+    async function openParcelPopupFromSearch(item) {
+        if (!item || !item.feature_id || item.lat === undefined || item.lng === undefined) {
+            return;
+        }
+
+        const tileProps = {
+            feature_id: item.feature_id,
+            site_address: item.site_address || '',
+            acres: null,
+            lat: item.lat,
+            lng: item.lng
+        };
+
+        const popup = new maplibregl.Popup()
+            .setLngLat([item.lng, item.lat])
+            .setHTML(buildParcelLoadingPopup(tileProps))
+            .addTo(map);
+        setActivePopup(popup);
+
+        try {
+            const details = await fetchParcelDetails(item.feature_id);
+            if (selectedFeatureId !== item.feature_id || !popup.isOpen()) {
+                return;
+            }
+            popup.setHTML(buildParcelDetailsPopup(tileProps, details));
+        } catch (err) {
+            if (selectedFeatureId !== item.feature_id || !popup.isOpen()) {
+                return;
+            }
+            popup.setHTML(createPopupHTML({
+                currentStyle,
+                title: tileProps.site_address || 'Parcel',
+                accent: '#2f6ea9',
+                maxWidth: 360,
+                rows: [
+                    { label: 'Address', value: tileProps.site_address || 'N/A' },
+                    { label: 'Acres', value: 'N/A' },
+                    { label: 'Details', value: 'Unable to load full parcel details' }
+                ]
+            }));
+        }
+    }
+
+    function buildParcelLoadingPopup(props) {
+        return createPopupHTML({
+            currentStyle,
+            title: props.site_address || 'Parcel',
+            accent: '#2f6ea9',
+            maxWidth: 360,
+            rows: [
+                { label: 'Address', value: props.site_address || 'N/A' },
+                { label: 'Acres', value: formatNumber(props.acres) },
+                { label: 'Owner', value: '<span class="popup-skeleton-line popup-skeleton-long"></span>' },
+                { label: 'Class', value: '<span class="popup-skeleton-line popup-skeleton-medium"></span>' },
+                { label: 'Tax Dist', value: '<span class="popup-skeleton-line popup-skeleton-short"></span>' }
+            ],
+            footerText: 'Loading full parcel details...'
+        });
+    }
+
+    function buildParcelDetailsPopup(tileProps, details) {
+        const siteAddress = details.site_address || tileProps.site_address || 'N/A';
+        const acres = details.acres !== null && details.acres !== undefined ? details.acres : tileProps.acres;
+        const classValue = `${details.category || 'N/A'} (${details.classification || 'N/A'})`;
+        const lat = details.lat !== null && details.lat !== undefined ? details.lat : tileProps.lat;
+        const lng = details.lng !== null && details.lng !== undefined ? details.lng : tileProps.lng;
+
+        return createPopupHTML({
+            currentStyle,
+            title: siteAddress,
+            accent: '#2f6ea9',
+            maxWidth: 360,
+            rows: [
+                { label: 'Parcel ID', value: details.parcel_id || 'N/A' },
+                { label: 'Address', value: siteAddress },
+                { label: 'Owner', value: details.owner_name || 'N/A' },
+                { label: 'Owner Addr', value: details.owner_address || 'N/A' },
+                { label: 'Acres', value: formatNumber(acres) },
+                { label: 'Class', value: classValue },
+                { label: 'Tax Dist', value: details.tax_district || 'N/A' }
+            ],
+            footerHtml: buildParcelFooter({
+                currentStyle,
+                lat,
+                lng,
+                updatedAt: details.updated_at
+            })
+        });
+    }
 
     // Click handler for parcels
-    map.on('click', 'parcel-fill', (e) => {
+    map.on('click', 'parcel-fill', async (e) => {
         if (e.features.length === 0) return;
 
         const feature = e.features[0];
@@ -577,29 +1177,45 @@ async function loadMap() {
             { selected: true }
         );
 
-        // Create popup content
         const props = feature.properties;
-        const popupHTML = createPopupHTML({
-            currentStyle,
-            title: props.site_address || `Parcel ${props.parcel_id || ''}`,
-            accent: '#2f6ea9',
-            maxWidth: 360,
-            rows: [
-                { label: 'Parcel ID', value: props.parcel_id || 'N/A' },
-                { label: 'Address', value: props.site_address || 'N/A' },
-                { label: 'Owner', value: props.owner_name || 'N/A' },
-                { label: 'Owner Addr', value: props.owner_address || 'N/A' },
-                { label: 'Acres', value: props.acres || 'N/A' },
-                { label: 'Class', value: `${props.category || 'N/A'} (${props.classification || 'N/A'})` },
-                { label: 'Tax Dist', value: props.tax_district || 'N/A' }
-            ]
-        });
-
-        // Show popup
-        new maplibregl.Popup()
+        const tileProps = {
+            ...props,
+            lat: e.lngLat.lat,
+            lng: e.lngLat.lng
+        };
+        const featureId = props.feature_id;
+        const popup = new maplibregl.Popup()
             .setLngLat(e.lngLat)
-            .setHTML(popupHTML)
+            .setHTML(buildParcelLoadingPopup(tileProps))
             .addTo(map);
+        setActivePopup(popup);
+
+        try {
+            const details = await fetchParcelDetails(featureId);
+
+            // Ignore stale async responses if the user selected another parcel or closed popup.
+            if (selectedFeatureId !== featureId || !popup.isOpen()) {
+                return;
+            }
+
+            popup.setHTML(buildParcelDetailsPopup(tileProps, details));
+        } catch (err) {
+            if (selectedFeatureId !== featureId || !popup.isOpen()) {
+                return;
+            }
+
+            popup.setHTML(createPopupHTML({
+                currentStyle,
+                title: tileProps.site_address || 'Parcel',
+                accent: '#2f6ea9',
+                maxWidth: 360,
+                rows: [
+                    { label: 'Address', value: tileProps.site_address || 'N/A' },
+                    { label: 'Acres', value: formatNumber(tileProps.acres) },
+                    { label: 'Details', value: 'Unable to load full parcel details' }
+                ]
+            }));
+        }
     });
 
     // County click handlers
@@ -636,7 +1252,8 @@ async function loadMap() {
                 { label: 'Sq. Miles', value: formatNumber(props.square_miles) }
             ]
         });
-        new maplibregl.Popup().setLngLat(e.lngLat).setHTML(popupHTML).addTo(map);
+        const popup = new maplibregl.Popup().setLngLat(e.lngLat).setHTML(popupHTML).addTo(map);
+        setActivePopup(popup);
     });
 
     // Change cursor on hover for counties
@@ -676,6 +1293,10 @@ async function loadMap() {
                 { selected: false }
             );
             selectedCountyId = null;
+        }
+
+        if (parcelFeatures.length === 0 && countyFeatures.length === 0) {
+            clearActivePopup();
         }
     });
 

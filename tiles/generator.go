@@ -75,17 +75,9 @@ func generateTile(db *gorm.DB, z, x, y int) ([]byte, error) {
 					true   -- clip geometry to tile bounds
 				) AS geom,
 				p.county_id || '_' || p.objectid AS feature_id,  -- Composite ID: unique across all counties
-				p.parcel_id,
 				p.site_address,
-				p.owner_name,
-				p.owner_address,
-				p.acres,
-				p.classification,
-				cc.category,
-				cc.color AS class_color,
-				p.tax_district
+				p.acres
 			FROM parcels p
-			LEFT JOIN parcel_class_codes cc ON p.county_id = cc.county_id AND p.classification = cc.code
 			WHERE p.geometry && ST_TileEnvelope($1, $2, $3)  -- Bbox check: both in 3857
 			  AND p.processed IS NULL
 		),

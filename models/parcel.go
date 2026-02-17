@@ -23,6 +23,8 @@ type Parcel struct {
 	Acres          sql.NullFloat64 `gorm:"type:numeric"` // Acres can be nullable/null
 	Classification sql.NullString  `gorm:"type:varchar(255)"`
 	TaxDistrict    sql.NullString  `gorm:"type:varchar(255)"`
+	SearchLat      sql.NullFloat64 `gorm:"type:double precision;column:search_lat"`
+	SearchLng      sql.NullFloat64 `gorm:"type:double precision;column:search_lng"`
 
 	// Geometry
 	Geometry string `gorm:"type:geometry(MultiPolygon, 3857)"`

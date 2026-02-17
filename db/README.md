@@ -76,6 +76,8 @@ erDiagram
         varchar(255) classification
         varchar(255) tax_district
         geometry geometry "MultiPolygon 3857"
+        float8 search_lat
+        float8 search_lng
         timestamp last_sync
         boolean processed
         text error_message
@@ -93,6 +95,14 @@ erDiagram
         numeric assessed
         numeric millage
         text payer_name
+        text bill_url
+        numeric building_value
+        numeric land_value
+        varchar(20) due_date
+        varchar(20) paid_date
+        numeric total_due
+        numeric back_taxes
+        timestamp last_updated_date
     }
 
     tiles {
@@ -193,6 +203,8 @@ The main table storing individual property parcels. Contains ~4.77 million recor
 | `classification` | `varchar(255)` | Land use classification code |
 | `tax_district` | `varchar(255)` | Tax jurisdiction district |
 | `geometry` | `geometry(MultiPolygon, 3857)` | Parcel boundary in Web Mercator |
+| `search_lat` | `double precision` | Precomputed parcel search latitude (WGS84) |
+| `search_lng` | `double precision` | Precomputed parcel search longitude (WGS84) |
 | `last_sync` | `timestamp` | Last successful data sync |
 | `processed` | `boolean` | NULL=success, FALSE=needs retry |
 | `error_message` | `text` | Error details if processing failed |
@@ -204,6 +216,10 @@ The main table storing individual property parcels. Contains ~4.77 million recor
 - `idx_parcels_county_parcel` - Composite index for lookups (btree on `county_id`, `parcel_id`)
 - `idx_parcels_geometry` - Spatial index (GiST on `geometry`)
 - `parcels_county_id_objectid_key` - Unique constraint per county (btree on `county_id`, `objectid`)
+- `idx_parcels_site_address_prefix_active` - Partial prefix search index for active address autocomplete
+- `idx_parcels_site_address_trgm_active` - Partial trigram search index for active address fuzzy search
+- `idx_parcels_owner_name_prefix_active` - Partial prefix search index for active owner autocomplete
+- `idx_parcels_owner_name_trgm_active` - Partial trigram search index for active owner fuzzy search
 
 > **Note on SRID**: Parcels use SRID 3857 (Web Mercator) because vector tiles are generated in this projection. County boundaries use SRID 4326 (WGS84) for compatibility with GeoJSON.
 
@@ -224,11 +240,18 @@ Historical tax records for parcels. Each parcel can have multiple records (one p
 | `assessed` | `numeric(14,2)` | Assessed value (40% of appraised in GA) |
 | `millage` | `numeric(8,6)` | Tax rate as decimal (e.g., 0.032) |
 | `payer_name` | `text` | Name of tax payer |
+| `bill_url` | `text` | Direct link to tax bill/details page (when available) |
+| `building_value` | `numeric` | Building improvement value |
+| `land_value` | `numeric` | Land value |
+| `due_date` | `varchar(20)` | Tax due date as provided by source |
+| `paid_date` | `varchar(20)` | Date paid as provided by source |
+| `total_due` | `numeric` | Total amount currently due |
+| `back_taxes` | `numeric` | Prior unpaid tax balance |
+| `last_updated_date` | `timestamp` | Last tax portal update timestamp |
 
 **Indexes:**
 - `parcel_taxes_pkey` - Primary key
 - `idx_tax_year` - Unique constraint (btree on `parcel_id`, `tax_year`)
-- `idx_parcel_taxes_year` - Query optimization (btree on `parcel_id`, `tax_year DESC`)
 
 ---
 
@@ -387,6 +410,14 @@ The precomputed GeoJSON includes all properties needed for the frontend:
   }
 }
 ```
+
+### Search Precomputation
+
+Parcel search uses precomputed `search_lat`/`search_lng` columns and indexed text matching so autocomplete does not run expensive geometry functions per keystroke.
+
+- `search_lat` / `search_lng` are maintained by trigger when `parcels.geometry` changes.
+- Prefix and trigram indexes are applied as **partial indexes** for active records (`processed IS NULL`, `objectid IS NOT NULL`, non-null coords/text).
+- The API endpoint `/api/search/parcels` supports `mode=address|owner` with prefix-first + trigram fallback.
 
 ---
 
