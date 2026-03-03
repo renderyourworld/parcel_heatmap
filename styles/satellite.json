@@ -1,0 +1,31 @@
+{
+    "layers": [
+        {
+            "id": "satellite-background",
+            "type": "background",
+            "paint": {
+                "background-color": "#111418"
+            }
+        },
+        {
+            "id": "satellite-imagery",
+            "type": "raster",
+            "source": "esri-imagery",
+            "minzoom": 0,
+            "maxzoom": 19,
+            "paint": {
+                "raster-opacity": 1
+            }
+        },
+        {
+            "id": "satellite-reference",
+            "type": "raster",
+            "source": "esri-reference",
+            "minzoom": 0,
+            "maxzoom": 19,
+            "paint": {
+                "raster-opacity": 0.9
+            }
+        }
+    ]
+}

@@ -20,11 +20,11 @@ type Parcel struct {
 	SiteNumber     sql.NullString  `gorm:"type:text"`
 	OwnerName      sql.NullString  `gorm:"type:text"`
 	OwnerAddress   sql.NullString  `gorm:"type:text"`
-	Acres          sql.NullFloat64 `gorm:"type:numeric"` // Acres can be nullable/null
+	Acres          sql.NullFloat64 `gorm:"type:double precision"` // Acres can be nullable/null
 	Classification sql.NullString  `gorm:"type:varchar(255)"`
 	TaxDistrict    sql.NullString  `gorm:"type:varchar(255)"`
-	SearchLat      sql.NullFloat64 `gorm:"type:double precision;column:search_lat"`
-	SearchLng      sql.NullFloat64 `gorm:"type:double precision;column:search_lng"`
+	SearchLat      sql.NullFloat64 `gorm:"type:real;column:search_lat"`
+	SearchLng      sql.NullFloat64 `gorm:"type:real;column:search_lng"`
 
 	// Geometry
 	Geometry string `gorm:"type:geometry(MultiPolygon, 3857)"`

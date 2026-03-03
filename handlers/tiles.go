@@ -314,5 +314,17 @@ func GetCacheStats(c *gin.Context) {
 		stats += "\nPMTiles Cache: Not initialized\n"
 	}
 
+	if tiles.TaxHeatmapTilesCache != nil {
+		stats += "\n" + tiles.TaxHeatmapTilesCache.Stats("Tax Heatmap Tile Cache")
+	} else {
+		stats += "\nTax Heatmap Tile Cache: Not initialized\n"
+	}
+
+	if tiles.TaxParcelTilesCache != nil {
+		stats += "\n" + tiles.TaxParcelTilesCache.Stats("Tax Parcel Tile Cache")
+	} else {
+		stats += "\nTax Parcel Tile Cache: Not initialized\n"
+	}
+
 	c.String(http.StatusOK, stats)
 }

@@ -1,82 +1,56 @@
 package handlers
 
 import (
-	"log"
 	"net/http"
+	"strconv"
 
 	"github.com/gin-gonic/gin"
-	"github.com/renderyourworld/parcel_heatmap/utils"
-	"gorm.io/gorm"
+	"github.com/renderyourworld/parcel_heatmap/db"
 )
 
-// Package-level variables to store preloaded county boundary data
-var (
-	simplifiedCountyData           []byte
-	fullCountyData                 []byte
-	simplifiedCountyDataCompressed []byte
-	fullCountyDataCompressed       []byte
-)
-
-// LoadCountyBoundaries preloads simplified and full county boundary data
-// from the database and stores them in memory.
-func LoadCountyBoundaries(database *gorm.DB) error {
-	log.Println("Loading county boundaries from database...")
-
-	// Load simplified boundary data
-	var simplifiedGeoJSON string
-	simplifiedQuery := `
-		SELECT jsonb_build_object(
-			'type', 'FeatureCollection',
-			'features', jsonb_agg(t.boundary_simplified_geojson)
-		)::text AS geojson
-		FROM counties AS t;
-	`
-	if err := database.Raw(simplifiedQuery).Scan(&simplifiedGeoJSON).Error; err != nil {
-		return err
+// GetCountyCentroid returns county center in WGS84 for popup anchoring.
+// URL format: /api/counties/{id}/centroid
+func GetCountyCentroid(c *gin.Context) {
+	idStr := c.Param("id")
+	countyID, err := strconv.Atoi(idStr)
+	if err != nil || countyID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid county id"})
+		return
 	}
-	simplifiedCountyData = []byte(simplifiedGeoJSON)
-	log.Printf("Loaded simplified county boundaries")
 
-	// Compress simplified data
-	simplifiedCompressed, err := utils.Gzip(simplifiedCountyData)
-	if err != nil {
-		return err
+	var row struct {
+		ID    int
+		Name  string
+		State string
+		Lat   float64
+		Lng   float64
 	}
-	simplifiedCountyDataCompressed = simplifiedCompressed
 
-	// Load full boundary data
-	var fullGeoJSON string
-	fullQuery := `
-		SELECT jsonb_build_object(
-			'type', 'FeatureCollection',
-			'features', jsonb_agg(t.boundary_geojson)
-		)::text AS geojson
-		FROM counties AS t;
-	`
-	if err := database.Raw(fullQuery).Scan(&fullGeoJSON).Error; err != nil {
-		return err
+	if err := db.DB.Raw(`
+		SELECT
+			c.id,
+			c.name,
+			c.state,
+			ST_Y(COALESCE(c.centroid, ST_PointOnSurface(c.boundary))) AS lat,
+			ST_X(COALESCE(c.centroid, ST_PointOnSurface(c.boundary))) AS lng
+		FROM counties c
+		WHERE c.id = ?
+		LIMIT 1
+	`, countyID).Scan(&row).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch county centroid"})
+		return
 	}
-	fullCountyData = []byte(fullGeoJSON)
-	log.Printf("Loaded full county boundaries")
 
-	// Compress full data
-	fullCompressed, err := utils.Gzip(fullCountyData)
-	if err != nil {
-		return err
+	if row.ID == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "county not found"})
+		return
 	}
-	fullCountyDataCompressed = fullCompressed
 
-	return nil
-}
-
-// GetSimplifiedCountyBoundaries returns preloaded simplified county boundaries.
-func GetSimplifiedCountyBoundaries(c *gin.Context) {
-	c.Header("Content-Encoding", "gzip")
-	c.Data(http.StatusOK, "application/vnd.geo+json", simplifiedCountyDataCompressed)
-}
-
-// GetFullCountyBoundaries returns preloaded full-detail county boundaries.
-func GetFullCountyBoundaries(c *gin.Context) {
-	c.Header("Content-Encoding", "gzip")
-	c.Data(http.StatusOK, "application/vnd.geo+json", fullCountyDataCompressed)
+	c.JSON(http.StatusOK, gin.H{
+		"id":    row.ID,
+		"name":  row.Name,
+		"state": row.State,
+		"lat":   row.Lat,
+		"lng":   row.Lng,
+	})
 }

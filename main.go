@@ -43,6 +43,8 @@ func main() {
 
 	generateTiles := flag.Bool("generate-tiles", false, "Generate vector tiles for existing parcels")
 	generateCountyTiles := flag.Bool("generate-county-tiles", false, "Generate vector tiles for county boundaries")
+	generateTaxHeatmapTiles := flag.Bool("generate-tax-heatmap-tiles", false, "Generate precomputed tax heatmap tiles (tax_amount)")
+	taxYear := flag.Int("tax-year", 0, "Tax year for heatmap tile generation (0 = all years 2015-2024)")
 	minZoom := flag.Int("min-zoom", 13, "Minimum zoom level for tile generation")
 	maxZoom := flag.Int("max-zoom", 19, "Maximum zoom level for tile generation")
 
@@ -173,6 +175,50 @@ func main() {
 		}
 
 		log.Println("County tile generation completed successfully!")
+		os.Exit(0)
+	}
+
+	// Check if we should generate tax heatmap tiles
+	if *generateTaxHeatmapTiles {
+		if *county == "" {
+			log.Fatal("Error: --county flag is required when using --generate-tax-heatmap-tiles")
+		}
+
+		var countyRecord models.County
+		if err := db.DB.Where("name = ?", *county).First(&countyRecord).Error; err != nil {
+			log.Fatalf("ERROR: County '%s' not found: %v", *county, err)
+		}
+
+		var years []int
+		if *taxYear > 0 {
+			years = []int{*taxYear}
+		} else {
+			for y := 2015; y <= 2024; y++ {
+				years = append(years, y)
+			}
+		}
+
+		// For heatmap v1 we use zoom 6-16 unless overridden.
+		hmMin := *minZoom
+		hmMax := *maxZoom
+		if hmMin == 13 && hmMax == 19 {
+			hmMin = 6
+			hmMax = 16
+		}
+
+		log.Printf("Generating tax heatmap grid tiles for %s county years=%v zoom=%d-%d", countyRecord.Name, years, hmMin, hmMax)
+		if err := tiles.GenerateTaxHeatmapTilesForCounty(db.DB, countyRecord.ID, countyRecord.Name, years, hmMin, hmMax, *logging); err != nil {
+			log.Fatalf("ERROR: Tax heatmap tile generation failed: %v", err)
+		}
+
+		parcelMinZoom := 13
+		parcelMaxZoom := 19
+		log.Printf("Generating tax parcel tiles for %s county years=%v zoom=%d-%d", countyRecord.Name, years, parcelMinZoom, parcelMaxZoom)
+		if err := tiles.GenerateTaxParcelTilesForCounty(db.DB, countyRecord.ID, countyRecord.Name, years, parcelMinZoom, parcelMaxZoom, *logging); err != nil {
+			log.Fatalf("ERROR: Tax parcel tile generation failed: %v", err)
+		}
+
+		log.Println("Tax heatmap tile generation completed successfully!")
 		os.Exit(0)
 	}
 
@@ -464,6 +510,14 @@ func main() {
 
 	// Initialize the Parcel tile cache
 	tiles.InitParcelTilesCache()
+	// Initialize tax heatmap/tax parcel tile caches
+	tiles.InitTaxTilesCache()
+	// Preload default county tax heatmap stats for all available years.
+	if err := handlers.PreloadTaxHeatmapStatsForCounty(671); err != nil {
+		log.Printf("WARNING: Failed preloading tax heatmap stats cache for county 671: %v", err)
+	} else {
+		log.Printf("Tax heatmap stats cache preloaded for county 671")
+	}
 
 	// Initialize PMTiles cache
 	if err := tiles.InitPMTilesCache(); err != nil {
@@ -568,39 +622,28 @@ func main() {
 	router.StaticFile("/", "./index.html")
 	router.StaticFile("/index.html", "./index.html")
 
-	// No cache for dev work
-	router.GET("/app.js", func(c *gin.Context) {
-		c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
-		c.Header("Pragma", "no-cache")
-		c.Header("Expires", "0")
-		c.File("./app.js")
-	})
-
-	router.StaticFile("/styles/light.json", "./styles/light.json")
-	router.StaticFile("/styles/dark.json", "./styles/dark.json")
-	router.StaticFile("/styles/black.json", "./styles/black.json")
-	router.StaticFile("/styles/grayscale.json", "./styles/grayscale.json")
-	router.StaticFile("/styles/white.json", "./styles/white.json")
-
 	router.GET("/georgia.pmtiles", handlers.ServePMTilesWithCache)
 
-	// Serve lib files with aggressive caching
-	router.GET("/lib/*filepath", func(c *gin.Context) {
-		c.Header("Cache-Control", "public, max-age=31536000, immutable")
-		c.File("./static/lib" + c.Param("filepath"))
+	// Serve static assets (lib/fonts/sprites) with aggressive caching.
+	router.Use(func(c *gin.Context) {
+		if strings.HasPrefix(c.Request.URL.Path, "/assets/") {
+			c.Header("Cache-Control", "public, max-age=31536000, immutable")
+		}
+		c.Next()
 	})
+	router.Static("/assets", "./static")
 
-	// Serve fonts with aggressive caching
-	router.GET("/fonts/*filepath", func(c *gin.Context) {
-		c.Header("Cache-Control", "public, max-age=31536000, immutable")
-		c.File("./static/fonts" + c.Param("filepath"))
+	// Serve JavaScript modules and style manifests.
+	router.Use(func(c *gin.Context) {
+		if strings.HasPrefix(c.Request.URL.Path, "/js/") && strings.HasSuffix(c.Request.URL.Path, ".js") {
+			c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
+			c.Header("Pragma", "no-cache")
+			c.Header("Expires", "0")
+		}
+		c.Next()
 	})
-
-	// Serve sprites with aggressive caching
-	router.GET("/sprites/*filepath", func(c *gin.Context) {
-		c.Header("Cache-Control", "public, max-age=31536000, immutable")
-		c.File("./static/sprites" + c.Param("filepath"))
-	})
+	router.Static("/js", "./js")
+	router.Static("/styles", "./styles")
 
 	// Register API routes
 	api := router.Group("/api")
@@ -608,19 +651,20 @@ func main() {
 		// Vector tile endpoints for pre-generated MVT tiles
 		api.GET("/tiles/:z/:x/:y", handlers.GetVectorTile)          // Parcel tiles
 		api.GET("/tiles/counties/:z/:x/:y", handlers.GetCountyTile) // County tiles
-		api.GET("/parcels/:feature_id", handlers.GetParcelDetails)   // Live parcel details for popup hydration
-		api.GET("/search/parcels", handlers.SearchParcels)           // Parcel address search/autocomplete
+		api.GET("/tiles/tax-heatmap/:z/:x/:y", handlers.GetTaxHeatmapTile)
+		api.GET("/tiles/tax-parcels/:z/:x/:y", handlers.GetTaxParcelTile)
+		api.GET("/tax-heatmap/stats", handlers.GetTaxHeatmapStats)
+		api.POST("/tax-heatmap/parcel-values", handlers.GetParcelTaxValuesBatch)
+		api.GET("/parcels/:feature_id", handlers.GetParcelDetails) // Live parcel details for popup hydration
+		api.GET("/parcels/:feature_id/taxes", handlers.GetParcelTaxHistory)
+		api.POST("/parcels/previews", handlers.GetParcelPreviews)
+		api.GET("/owners/properties", handlers.GetOwnerProperties)
+		api.GET("/counties/:id/centroid", handlers.GetCountyCentroid)
+		api.GET("/search/parcels", handlers.SearchParcels) // Parcel address search/autocomplete
 
 		// Cache stats endpoint
 		api.GET("/cache/stats", handlers.GetCacheStats)
 	}
-
-	// Health check endpoint
-	router.GET("/ping", func(c *gin.Context) {
-		c.JSON(200, gin.H{
-			"message": "pong",
-		})
-	})
 
 	// Start the server
 	log.Println("Parcel Heatmap server starting on port 9000")

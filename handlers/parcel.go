@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/renderyourworld/parcel_heatmap/db"
@@ -37,6 +38,7 @@ func GetParcelDetails(c *gin.Context) {
 		FeatureID      string
 		ParcelID       sql.NullString
 		SiteAddress    sql.NullString
+		DisplayAddress sql.NullString
 		OwnerName      sql.NullString
 		OwnerAddress   sql.NullString
 		Acres          sql.NullFloat64
@@ -53,6 +55,7 @@ func GetParcelDetails(c *gin.Context) {
 			p.county_id || '_' || p.objectid AS feature_id,
 			p.parcel_id,
 			p.site_address,
+			ps.display_address,
 			p.owner_name,
 			p.owner_address,
 			p.acres::float8 AS acres,
@@ -63,6 +66,8 @@ func GetParcelDetails(c *gin.Context) {
 			p.search_lng,
 			p.updated_at
 		FROM parcels p
+		LEFT JOIN parcel_search ps
+			ON ps.county_id = p.county_id AND ps.objectid = p.objectid
 		LEFT JOIN parcel_class_codes cc
 			ON p.county_id = cc.county_id AND p.classification = cc.code
 		WHERE p.county_id = ? AND p.objectid = ? AND p.processed IS NULL
@@ -73,6 +78,7 @@ func GetParcelDetails(c *gin.Context) {
 		&details.FeatureID,
 		&details.ParcelID,
 		&details.SiteAddress,
+		&details.DisplayAddress,
 		&details.OwnerName,
 		&details.OwnerAddress,
 		&details.Acres,
@@ -96,6 +102,7 @@ func GetParcelDetails(c *gin.Context) {
 		"feature_id":     details.FeatureID,
 		"parcel_id":      nullString(details.ParcelID),
 		"site_address":   nullString(details.SiteAddress),
+		"display_address": nullString(details.DisplayAddress),
 		"owner_name":     nullString(details.OwnerName),
 		"owner_address":  nullString(details.OwnerAddress),
 		"acres":          nullFloat(details.Acres),
@@ -105,6 +112,89 @@ func GetParcelDetails(c *gin.Context) {
 		"lat":            nullFloat(details.SearchLat),
 		"lng":            nullFloat(details.SearchLng),
 		"updated_at":     nullTime(details.UpdatedAt),
+	})
+}
+
+// GetParcelTaxHistory returns all available tax history rows for a parcel feature_id.
+// URL format: /api/parcels/{feature_id}/taxes
+func GetParcelTaxHistory(c *gin.Context) {
+	featureID := c.Param("feature_id")
+	parts := strings.SplitN(featureID, "_", 2)
+	if len(parts) != 2 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid feature_id format"})
+		return
+	}
+
+	countyID, err := strconv.ParseInt(parts[0], 10, 32)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid county_id in feature_id"})
+		return
+	}
+
+	objectID, err := strconv.ParseInt(parts[1], 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid objectid in feature_id"})
+		return
+	}
+
+	var parcel struct {
+		ID uint64
+	}
+	row := db.DB.Raw(`
+		SELECT id
+		FROM parcels
+		WHERE county_id = ? AND objectid = ? AND processed IS NULL
+		LIMIT 1
+	`, countyID, objectID).Row()
+	if err := row.Scan(&parcel.ID); err != nil {
+		if err.Error() == "sql: no rows in result set" {
+			c.JSON(http.StatusNotFound, gin.H{"error": "parcel not found"})
+			return
+		}
+		log.Printf("ERROR: Failed parcel tax history lookup for feature_id=%s: %v", featureID, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch parcel tax history"})
+		return
+	}
+
+	type taxRow struct {
+		TaxYear         uint16
+		TaxAmount       sql.NullFloat64
+		Millage         sql.NullFloat64
+		LastUpdatedDate sql.NullTime
+	}
+
+	var taxes []taxRow
+	if err := db.DB.Raw(`
+		SELECT
+			tax_year,
+			tax_amount::float8 AS tax_amount,
+			millage::float8 AS millage,
+			last_updated_date
+		FROM parcel_taxes
+		WHERE parcel_id = ?
+		ORDER BY tax_year DESC
+	`, parcel.ID).Scan(&taxes).Error; err != nil {
+		log.Printf("ERROR: Failed tax history query for feature_id=%s parcel_id=%d: %v", featureID, parcel.ID, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch parcel tax history"})
+		return
+	}
+
+	rows := make([]gin.H, 0, len(taxes))
+	for _, t := range taxes {
+		rows = append(rows, gin.H{
+			"tax_year":          t.TaxYear,
+			"tax_amount":        nullFloat(t.TaxAmount),
+			"millage":           nullFloat(t.Millage),
+			"last_updated_date": nullTime(t.LastUpdatedDate),
+		})
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"feature_id": featureID,
+		"parcel_id":  parcel.ID,
+		"count":      len(rows),
+		"rows":       rows,
+		"fetched_at": time.Now().UTC(),
 	})
 }
 

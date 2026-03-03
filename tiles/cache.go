@@ -21,6 +21,13 @@ type TileEntry struct {
 	size int64
 }
 
+// StringEntry stores string-keyed tile data and size.
+type StringEntry struct {
+	key  string
+	data []byte
+	size int64
+}
+
 // ZoomLRU is a least-recently-used cache for a specific zoom level with a byte quota
 type ZoomLRU struct {
 	maxBytes  int64
@@ -88,6 +95,15 @@ type TileCache struct {
 	zooms map[int]*ZoomLRU
 }
 
+// StringLRU is a byte-bounded LRU cache keyed by string.
+type StringLRU struct {
+	maxBytes  int64
+	currBytes int64
+	ll        *list.List
+	cache     map[string]*list.Element
+	mu        sync.RWMutex
+}
+
 // Get retrieves a tile from the appropriate zoom cache
 func (tc *TileCache) Get(z, x, y int) ([]byte, bool) {
 	if cache, ok := tc.zooms[z]; ok {
@@ -125,6 +141,8 @@ var ParcelTilesCache *TileCache
 var CountyTilesCache *sync.Map // Simple map for county tiles (no eviction, few tiles)
 var PMTilesCache *lru.Cache[string, []byte]
 var PMTilesSize uint64
+var TaxHeatmapTilesCache *StringLRU
+var TaxParcelTilesCache *StringLRU
 
 // NewZoomLRU creates a new LRU cache for a specific zoom level
 func NewZoomLRU(maxBytes int64) *ZoomLRU {
@@ -133,6 +151,73 @@ func NewZoomLRU(maxBytes int64) *ZoomLRU {
 		ll:       list.New(),
 		cache:    make(map[TileKey]*list.Element),
 	}
+}
+
+// NewStringLRU creates a new byte-bounded LRU cache keyed by string.
+func NewStringLRU(maxBytes int64) *StringLRU {
+	return &StringLRU{
+		maxBytes: maxBytes,
+		ll:       list.New(),
+		cache:    make(map[string]*list.Element),
+	}
+}
+
+// Get retrieves cached bytes by string key.
+func (c *StringLRU) Get(key string) ([]byte, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if ele, ok := c.cache[key]; ok {
+		c.ll.MoveToFront(ele)
+		return ele.Value.(*StringEntry).data, true
+	}
+	return nil, false
+}
+
+// Put stores bytes by string key with LRU eviction by total bytes.
+func (c *StringLRU) Put(key string, data []byte) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	entrySize := int64(len(data))
+	if entrySize > c.maxBytes {
+		return
+	}
+
+	if ele, ok := c.cache[key]; ok {
+		c.ll.MoveToFront(ele)
+		oldEntry := ele.Value.(*StringEntry)
+		c.currBytes -= oldEntry.size
+		oldEntry.data = data
+		oldEntry.size = entrySize
+		c.currBytes += entrySize
+	} else {
+		ele := c.ll.PushFront(&StringEntry{key: key, data: data, size: entrySize})
+		c.cache[key] = ele
+		c.currBytes += entrySize
+	}
+
+	for c.currBytes > c.maxBytes {
+		c.removeOldest()
+	}
+}
+
+func (c *StringLRU) removeOldest() {
+	ele := c.ll.Back()
+	if ele != nil {
+		c.ll.Remove(ele)
+		kv := ele.Value.(*StringEntry)
+		delete(c.cache, kv.key)
+		c.currBytes -= kv.size
+	}
+}
+
+// Stats returns entry count and byte usage for this cache.
+func (c *StringLRU) Stats(name string) string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return fmt.Sprintf("%s:\n  Entries: %d\n  Cache Size: %.2f MB / %.2f MB\n",
+		name, len(c.cache), float64(c.currBytes)/1024/1024, float64(c.maxBytes)/1024/1024)
 }
 
 // InitPMTilesCache initializes the LRU cache for PMTiles range requests
@@ -168,4 +253,12 @@ func InitParcelTilesCache() {
 	for z, quota := range quotas {
 		ParcelTilesCache.zooms[z] = NewZoomLRU(quota)
 	}
+}
+
+// InitTaxTilesCache initializes in-memory caches for tax heatmap/grid and tax parcel tiles.
+func InitTaxTilesCache() {
+	// Grid tiles are precomputed and reused heavily; keep a moderate cache.
+	TaxHeatmapTilesCache = NewStringLRU(96 * 1024 * 1024)
+	// Tax parcel tiles are dynamic and can be large/hot at parcel zooms.
+	TaxParcelTilesCache = NewStringLRU(160 * 1024 * 1024)
 }
