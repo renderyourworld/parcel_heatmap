@@ -321,6 +321,102 @@ func main() {
 		os.Exit(0)
 	}
 
+	// Build/refresh parcel_search projection table.
+	if *buildParcelSearch {
+		if *county == "" {
+			log.Fatal("Error: --county flag is required when using --build-parcel-search (use 'all' for statewide)")
+		}
+
+		counties := strings.Split(*county, ",")
+		for i, c := range counties {
+			c = strings.TrimSpace(c)
+			if c == "" {
+				continue
+			}
+
+			var cleanup func()
+			if *logging {
+				var err error
+				cleanup, err = utils.SetupFileLogger(c, "search")
+				if err != nil {
+					log.Printf("Warning: Failed to set up file logging: %v", err)
+				}
+			}
+
+			if err := importers.StartParcelSearchBuilder(db.DB, c, *resume, *maxParcels); err != nil {
+				log.Printf("ERROR: parcel_search build failed for %s: %v", c, err)
+				if cleanup != nil {
+					cleanup()
+				}
+				os.Exit(1)
+			}
+			log.Printf("parcel_search build completed successfully for %s!", c)
+
+			if i < len(counties)-1 {
+				delayMin := 1 + rand.Intn(2)  // 1-2 minutes
+				delaySeconds := rand.Intn(60) // 0-59 seconds
+				totalDelay := time.Duration(delayMin)*time.Minute + time.Duration(delaySeconds)*time.Second
+				fmt.Printf("Waiting %v before next county...\n", totalDelay)
+				if cleanup != nil {
+					cleanup()
+				}
+				time.Sleep(totalDelay)
+			} else if cleanup != nil {
+				cleanup()
+			}
+		}
+
+		os.Exit(0)
+	}
+
+	// Build/refresh materialized owner groups table.
+	if *buildOwnerGroups {
+		if *county == "" {
+			log.Fatal("Error: --county flag is required when using --build-owner-groups (use 'all' for statewide)")
+		}
+
+		counties := strings.Split(*county, ",")
+		for i, c := range counties {
+			c = strings.TrimSpace(c)
+			if c == "" {
+				continue
+			}
+
+			var cleanup func()
+			if *logging {
+				var err error
+				cleanup, err = utils.SetupFileLogger(c, "owner_groups")
+				if err != nil {
+					log.Printf("Warning: Failed to set up file logging: %v", err)
+				}
+			}
+
+			if err := importers.StartOwnerGroupsBuilder(db.DB, c, *resume, *maxParcels); err != nil {
+				log.Printf("ERROR: owner_groups build failed for %s: %v", c, err)
+				if cleanup != nil {
+					cleanup()
+				}
+				os.Exit(1)
+			}
+			log.Printf("owner_groups build completed successfully for %s!", c)
+
+			if i < len(counties)-1 {
+				delayMin := 1 + rand.Intn(2)  // 1-2 minutes
+				delaySeconds := rand.Intn(60) // 0-59 seconds
+				totalDelay := time.Duration(delayMin)*time.Minute + time.Duration(delaySeconds)*time.Second
+				fmt.Printf("Waiting %v before next county...\n", totalDelay)
+				if cleanup != nil {
+					cleanup()
+				}
+				time.Sleep(totalDelay)
+			} else if cleanup != nil {
+				cleanup()
+			}
+		}
+
+		os.Exit(0)
+	}
+
 	if *importTaxes {
 		if *county == "" {
 			log.Fatal("Error: --county flag is required when using --import-taxes")
