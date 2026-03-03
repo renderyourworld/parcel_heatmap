@@ -76,8 +76,8 @@ erDiagram
         varchar(255) classification
         varchar(255) tax_district
         geometry geometry "MultiPolygon 3857"
-        float8 search_lat
-        float8 search_lng
+        float4 search_lat
+        float4 search_lng
         timestamp last_sync
         boolean processed
         text error_message
@@ -164,8 +164,8 @@ Stores Georgia county boundaries and associated metadata. This is the foundation
 | `boundary_simplified` | `geometry(MultiPolygon, 4326)` | Simplified boundary for low-zoom rendering |
 | `centroid` | `geometry(Point, 4326)` | Geographic center point |
 | `bbox` | `geometry(Polygon, 4326)` | Bounding box envelope |
-| `boundary_geojson` | `jsonb` | **Precomputed** full boundary as GeoJSON Feature |
-| `boundary_simplified_geojson` | `jsonb` | **Precomputed** simplified boundary as GeoJSON Feature |
+| `boundary_geojson` | `jsonb` | Legacy precomputed GeoJSON blob (not used by current county tile serving path) |
+| `boundary_simplified_geojson` | `jsonb` | Legacy precomputed simplified GeoJSON blob |
 | `population` | `bigint` | 2010 census population |
 | `region` | `varchar(50)` | Georgia regional commission name |
 | `acres` | `numeric` | Total land area in acres |
@@ -199,12 +199,12 @@ The main table storing individual property parcels. Contains ~4.77 million recor
 | `site_number` | `text` | Street number (extracted for display) |
 | `owner_name` | `text` | Property owner name |
 | `owner_address` | `text` | Owner mailing address |
-| `acres` | `numeric` | Parcel size in acres |
+| `acres` | `double precision` | Parcel size in acres |
 | `classification` | `varchar(255)` | Land use classification code |
 | `tax_district` | `varchar(255)` | Tax jurisdiction district |
 | `geometry` | `geometry(MultiPolygon, 3857)` | Parcel boundary in Web Mercator |
-| `search_lat` | `double precision` | Precomputed parcel search latitude (WGS84) |
-| `search_lng` | `double precision` | Precomputed parcel search longitude (WGS84) |
+| `search_lat` | `real` | Precomputed parcel search latitude (WGS84) |
+| `search_lng` | `real` | Precomputed parcel search longitude (WGS84) |
 | `last_sync` | `timestamp` | Last successful data sync |
 | `processed` | `boolean` | NULL=success, FALSE=needs retry |
 | `error_message` | `text` | Error details if processing failed |
@@ -216,12 +216,10 @@ The main table storing individual property parcels. Contains ~4.77 million recor
 - `idx_parcels_county_parcel` - Composite index for lookups (btree on `county_id`, `parcel_id`)
 - `idx_parcels_geometry` - Spatial index (GiST on `geometry`)
 - `parcels_county_id_objectid_key` - Unique constraint per county (btree on `county_id`, `objectid`)
-- `idx_parcels_site_address_prefix_active` - Partial prefix search index for active address autocomplete
-- `idx_parcels_site_address_trgm_active` - Partial trigram search index for active address fuzzy search
 - `idx_parcels_owner_name_prefix_active` - Partial prefix search index for active owner autocomplete
 - `idx_parcels_owner_name_trgm_active` - Partial trigram search index for active owner fuzzy search
 
-> **Note on SRID**: Parcels use SRID 3857 (Web Mercator) because vector tiles are generated in this projection. County boundaries use SRID 4326 (WGS84) for compatibility with GeoJSON.
+> **Note on SRID**: Parcels use SRID 3857 (Web Mercator) because vector tiles are generated in this projection. County boundaries use SRID 4326 (WGS84) and are transformed during MVT generation.
 
 ---
 
@@ -264,7 +262,7 @@ Pre-generated Mapbox Vector Tiles (MVT) stored as gzipped binary data.
 | `z` | `smallint` | Zoom level (13-19 for parcels) |
 | `x` | `integer` | Tile X coordinate |
 | `y` | `integer` | Tile Y coordinate |
-| `layer` | `varchar(50)` | Layer name (default: 'parcels') |
+| `layer` | `varchar(50)` | Layer name (e.g., `parcels`, `counties`, `tax_heatmap_2024`) |
 | `data` | `bytea` | Gzipped MVT binary data |
 | `created_at` | `timestamp` | Tile generation time |
 
@@ -277,6 +275,9 @@ Pre-generated Mapbox Vector Tiles (MVT) stored as gzipped binary data.
 **Check Constraints:**
 - `z` must be between 0 and 30
 - `x` and `y` must be non-negative
+
+> **Note:** Tax heatmap grid tiles are precomputed and stored as `tax_heatmap_<year>` layers.  
+> Parcel-level tax tiles are precomputed as `tax_parcels_<county_id>_<year>` when generated, and the API can fall back to runtime generation if a tile is missing.
 
 ---
 
@@ -325,7 +326,7 @@ Tracks import progress for resumable batch operations.
 |--------|------|-------------|
 | `id` | `integer` | Primary key |
 | `county_name` | `varchar(50)` | County being imported |
-| `import_type` | `varchar(20)` | Type: 'parcel' or 'tax' |
+| `import_type` | `varchar(20)` | Import workflow key (e.g. `parcel`, `tax`, `parcel_search`, `owner_groups`, `qpublic_enrich`) |
 | `last_processed_id` | `bigint` | Last successfully processed record ID |
 | `status` | `varchar(20)` | RUNNING, COMPLETED, or FAILED |
 | `start_time` | `timestamp` | Import start time |
@@ -375,52 +376,52 @@ CREATE INDEX idx_parcels_geometry ON parcels USING gist(geometry);
 
 ## Precomputed Columns
 
-### The Problem
+### Active precomputation paths
 
-Converting PostGIS geometries to GeoJSON is expensive:
+The current serving path emphasizes tile and lookup precomputation:
 
-```sql
--- This is slow when called for 159 counties per request
-SELECT ST_AsGeoJSON(boundary) FROM counties;
-```
+- County/parcel/tax layers are pre-generated as MVT and stored gzipped in `tiles`.
+- `parcels.search_lat/search_lng` are trigger-maintained for fast map/search responses.
+- `parcel_search` is a materialized projection for address autocomplete and display ranking.
+- `owner_groups` + `owner_group_members` provide a fast materialized path for reverse-owner lookup.
 
-### The Solution
+### Legacy county GeoJSON columns
 
-Store pre-serialized GeoJSON as JSONB, computed once at import time:
-
-```sql
--- Precomputed once, served instantly
-SELECT boundary_geojson FROM counties;
-```
-
-The precomputed GeoJSON includes all properties needed for the frontend:
-
-```json
-{
-  "type": "Feature",
-  "geometry": { "type": "MultiPolygon", "coordinates": [...] },
-  "properties": {
-    "id": 1,
-    "name": "Fulton",
-    "state": "GA",
-    "population": 920581,
-    "region": "Atlanta Regional Commission",
-    "acres": 344320,
-    "square_miles": 538.0
-  }
-}
-```
+`counties.boundary_geojson` and `counties.boundary_simplified_geojson` may still exist in older databases, but current map rendering serves county vector tiles (`/api/tiles/counties/...`) rather than GeoJSON payloads.
 
 ### Search Precomputation
 
 Parcel search uses precomputed `search_lat`/`search_lng` columns and indexed text matching so autocomplete does not run expensive geometry functions per keystroke.
 
 - `search_lat` / `search_lng` are maintained by trigger when `parcels.geometry` changes.
-- Prefix and trigram indexes are applied as **partial indexes** for active records (`processed IS NULL`, `objectid IS NOT NULL`, non-null coords/text).
+- Address autocomplete uses the `parcel_search` projection table with prefix + trigram indexes on normalized address fields.
+- Owner autocomplete uses partial prefix + trigram indexes on `parcels.owner_name` for active records (`processed IS NULL`, `objectid IS NOT NULL`, non-null coords/text).
 - The API endpoint `/api/search/parcels` supports `mode=address|owner` with prefix-first + trigram fallback.
 
----
+### Reverse Owner Matching
 
+Reverse owner lookup (`/api/owners/properties`) is implemented as a hybrid pipeline:
+
+1. **Materialized lookup path**  
+   Uses `owner_group_members` + `owner_groups` (built by `--build-owner-groups`) for fast precomputed group retrieval.
+
+2. **Dynamic scoring fallback**  
+   If a materialized group is unavailable/incomplete, candidates are scored at request time using normalized owner-name/address rules.
+
+Confidence scoring combines:
+
+- Strict/relaxed owner-address key matches
+- House/street/city/ZIP combinations
+- Owner-name exact/subset/overlap similarity
+- PO Box ambiguity penalties
+- Minor county/proximity tie-breakers
+
+The API returns:
+
+- `match_confidence` (`0..100`)
+- `match_band` (`high` >= 85, `medium` >= 55, `low` < 55)
+
+---
 ## Vector Tile Generation
 
 ### Overview
@@ -464,6 +465,18 @@ FROM (
 ) AS tile;
 ```
 
+### Tax Heatmap Tile Strategy
+
+Tax visualization uses two tile paths:
+
+1. **Precomputed grid tiles** (`tax_heatmap_<year>`)  
+   Stored in the `tiles` table and served directly for low zoom levels (county overview).
+
+2. **Parcel tax tiles** (`tax_parcels_<county_id>_<year>`)  
+   Precomputed and stored in `tiles` for high zoom levels, with runtime generation as fallback when a specific tile is missing.
+
+This split avoids rendering parcel geometry at low zoom while preserving parcel precision at high zoom.
+
 
 ## Performance Metrics
 
@@ -471,25 +484,7 @@ FROM (
 
 | Query Type | Cold | Cached | Notes |
 |------------|------|--------|-------|
-| All counties (simplified GeoJSON) | 15-20ms | N/A | Served directly from JSONB |
-| All counties (full GeoJSON) | 120ms | 2ms | Cached in memory after first request |
-| Single tile lookup | 5-10ms | <1ms | LRU cache on hit |
+| County tile lookup | 5-10ms | <1ms | `tiles` table read on miss, in-memory county tile cache on hit |
+| Single tile lookup | 5-10ms | <1ms | Parcel tile LRU cache on hit |
 | Parcel by ID | <1ms | N/A | Primary key lookup |
 | Parcels in bbox | 10-50ms | N/A | Depends on result count |
-
-### Why Precomputation Matters
-
-```
-Without precomputation (runtime ST_AsGeoJSON):
-┌────────────────────────────────────────────────┐
-│ Request → Query 159 counties → ST_AsGeoJSON() │
-│           for each row → Build response       │
-│ Time: 150-300ms                               │
-└────────────────────────────────────────────────┘
-
-With precomputation (JSONB column):
-┌────────────────────────────────────────────────┐
-│ Request → SELECT boundary_geojson → Response  │
-│ Time: 15-20ms                                 │
-└────────────────────────────────────────────────┘
-```

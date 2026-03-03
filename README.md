@@ -16,21 +16,38 @@
 
 <img src="docs/screenshots/state-view.jpg" alt="Georgia Parcel Map" width="600">
 
+
+<p>
+A statewide Georgia parcel map with fast tile serving, search, parcel detail popup, owner reverse-search, and tax heatmap.
+Built with Go, PostgreSQL/PostGIS, and MapLibre GL JS.
+</p>
 </div>
-
-A full-stack geospatial web application for visualizing Georgia county boundaries and parcel data. Built with Go, PostgreSQL/PostGIS, and MapLibre GL JS.
-
 
 ## Screenshots
 
 <div align="center">
-  <h3>County & Parcel View</h3>
-  <img src="docs/screenshots/county-parcels.jpg" alt="County Parcels" width="600">
-  <p><em>Individual parcels visible at zoom 13+ with property boundaries</em></p>
-
-  <h3>Property Details</h3>
-  <img src="docs/screenshots/parcel-details.jpg" alt="Parcel Popup" width="600">
-  <p><em>Instant property information popup on click</em></p>
+  <table>
+    <tr>
+      <td align="center">
+        <img src="docs/screenshots/county-parcels.jpg" alt="County & Parcel View" width="320"><br>
+        <em>County + parcel boundaries</em>
+      </td>
+      <td align="center">
+        <img src="docs/screenshots/parcel-details.jpg" alt="Property Details Popup" width="320"><br>
+        <em>Parcel details popup</em>
+      </td>
+    </tr>
+    <tr>
+      <td align="center">
+        <img src="docs/screenshots/owner-properties.jpg" alt="Owner Properties Results" width="320"><br>
+        <em>Owner reverse search results</em>
+      </td>
+      <td align="center">
+        <img src="docs/screenshots/tax-heatmap.jpg" alt="Tax Heatmap View" width="320"><br>
+        <em>Tax heatmap (grid + parcel)</em>
+      </td>
+    </tr>
+  </table>
 </div>
 
 ## How It Works
@@ -115,10 +132,10 @@ The application uses PostgreSQL with the PostGIS extension for spatial data. The
 
 ### Key Optimizations
 
-- **Precomputed GeoJSON**: County boundaries are pre-serialized to JSONB via database triggers, eliminating expensive `ST_AsGeoJSON()` calls per request
-- **GiST Spatial Indexes**: All geometry columns are indexed for fast spatial queries
-- **Pre-generated Tiles**: Vector tiles are generated once and stored gzipped, avoiding real-time geometry processing
-- **Simplified Geometries**: County boundaries have both full and simplified versions (`ST_Simplify`) for zoom-appropriate rendering
+- **County Vector Tiles**: County boundaries are served as pre-generated MVT tiles (`/api/tiles/counties/:z/:x/:y`) instead of runtime GeoJSON serialization
+- **GiST Spatial Indexes**: Geometry columns are indexed for fast spatial filtering during tile generation and spatial queries
+- **Pre-generated Tiles**: Parcel/county/tax tiles are generated once and stored gzipped in PostgreSQL, avoiding per-request geometry processing
+- **In-memory Tile Caching**: Hot county/parcels/tax tiles are cached in memory to minimize database reads and decompression overhead
 
 ---
 
@@ -126,8 +143,8 @@ The application uses PostgreSQL with the PostGIS extension for spatial data. The
 
 | Metric | Value | Notes |
 |--------|-------|-------|
-| Simplified Counties | ~15-20ms | Precomputed JSONB served directly |
-| Full Counties (cached) | ~2ms | Served from memory after first request |
+| County Tiles (cached) | <1ms | Served from in-memory county tile cache |
+| County Tiles (cold) | ~5-10ms | Read gzipped MVT from PostgreSQL + decompress |
 | Vector Tile (cached) | <1ms | LRU cache hit |
 | Vector Tile (cold) | ~5-10ms | Database query + decompress |
 | Initial Page Load | ~35ms | Simplified boundaries + basemap |
@@ -159,6 +176,22 @@ Detailed parcel fields are now fetched on click from a live endpoint (`/api/parc
 | 18 | 1,275 B | 246 B |
 | 19 | 679 B | 182 B |
 
+### Property Tax Heatmap Architecture
+
+The property tax heatmap intentionally uses two render modes:
+
+1. **Grid Heatmap (zoom 6-12)**  
+   Precomputed yearly tiles (`layer = tax_heatmap_<year>`) store aggregated `avg_tax_amount` values per grid cell.
+
+2. **Parcel Heatmap (zoom 13-19)**  
+   Runtime vector tiles (`/api/tiles/tax-parcels/:z/:x/:y`) carry parcel geometry + per-year `tax_amount`.
+
+Why both layers exist:
+
+- A parcel-only heatmap is too heavy at county scale.
+- A grid-only heatmap loses parcel-level detail at high zoom.
+- The split keeps low-zoom performance fast while preserving high-zoom fidelity.
+
 ### Search Optimization
 
 The map includes a single search bar with mode toggle (`Address` / `Owner`) for fast parcel lookup:
@@ -172,7 +205,37 @@ Database-side search performance improvements:
 
 - `pg_trgm` extension for fuzzy matching
 - Precomputed `search_lat` / `search_lng` columns on `parcels` (trigger-maintained on geometry changes)
-- Partial prefix + trigram indexes aligned to active search filters (`processed IS NULL`, `objectid IS NOT NULL`, non-null coords/text)
+- Address search uses the dedicated `parcel_search` projection table with prefix + trigram indexes on normalized address fields
+- Owner search uses partial prefix + trigram indexes on `parcels.owner_name` aligned to active filters (`processed IS NULL`, `objectid IS NOT NULL`, non-null coords/text)
+
+### Reverse Owner Search
+
+The `Properties by Owner` workflow uses:
+
+- **Endpoint**: `/api/owners/properties?feature_id={county_id}_{objectid}` (preferred)  
+- **Fallback endpoint mode**: `/api/owners/properties?owner_name=...&owner_address=...`
+
+Runtime behavior is two-stage:
+
+1. **Materialized fast path**  
+   If the anchor parcel is present in `owner_group_members` and the group returns at least 2 parcels, results are served from precomputed owner groups.
+
+2. **Dynamic hybrid scoring fallback**  
+   If materialized data is missing/incomplete, the API runs statewide candidate selection and computes a `match_confidence` score per parcel.
+
+Current scoring signals include:
+
+- Owner address normalization matches (strict and relaxed)
+- House/street/city/ZIP combinations
+- Owner-name similarity (exact, subset, overlap)
+- PO Box penalties for ambiguity
+- Surname mismatch penalty when address evidence is weak
+- Small county/proximity tie-breakers
+
+Results are filtered by confidence threshold and returned with:
+
+- `match_confidence` (0-100)
+- `match_band` (`high` >= 85, `medium` >= 55, else `low`)
 
 ### Tile Cache Configuration
 
@@ -189,6 +252,15 @@ The application uses a **zoom-aware LRU cache** with ~200MB total memory budget.
 | 19 | 2 MB | 182 B | ~11,500 tiles |
 
 This design ensures that the most expensive tiles (low zoom with many parcels) stay cached longer, while high-zoom tiles with fewer parcels are evicted more aggressively since they're cheap to regenerate.
+
+### Additional Heatmap Caches
+
+The server also maintains dedicated in-memory caches for heatmap traffic:
+
+- **Tax Heatmap Grid Cache** (`tax_heatmap_<year>` responses): ~96MB
+- **Tax Parcel Tile Cache** (`/api/tiles/tax-parcels/...` responses): ~160MB
+
+These are separate from the base parcel tile LRU because grid and parcel-heatmap tiles have different payload sizes, access patterns, and keys (`year`, and for parcel heatmap also `county_id`).
 
 ---
 
@@ -218,6 +290,12 @@ go run main.go --generate-tiles --county "all"
 
 # Generate tiles with custom zoom range
 go run main.go --generate-tiles --county "Fulton" --min-zoom 13 --max-zoom 16
+
+# Generate tax heatmap grid tiles (tax_amount-based) for all supported years
+go run main.go --generate-tax-heatmap-tiles --county "Forsyth"
+
+# Generate tax heatmap grid tiles for a single tax year
+go run main.go --generate-tax-heatmap-tiles --county "Forsyth" --tax-year 2024
 
 # Import with verbose logging to file
 go run main.go --import-parcels --county "Fulton" --log
@@ -249,7 +327,7 @@ parcel_heatmap/
 ├── handlers/
 │   ├── county.go        # County boundary API endpoints
 │   ├── parcel.go        # Live parcel detail endpoint for popup hydration
-|   +-- search.go        # Parcel address/owner search endpoint
+│   ├── search.go        # Parcel address/owner search endpoint
 │   └── tiles.go         # Vector tile serving with caching
 │
 ├── importers/
