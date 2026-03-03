@@ -32,6 +32,8 @@ func main() {
 	// Parse command-line flags
 	importParcels := flag.Bool("import-parcels", false, "Run parcel importer for specified county")
 	enrichParcels := flag.Bool("enrich-parcels", false, "Run parcel enrichment for specified county")
+	buildParcelSearch := flag.Bool("build-parcel-search", false, "Build parcel_search projection table for address autocomplete")
+	buildOwnerGroups := flag.Bool("build-owner-groups", false, "Build materialized owner group relationships for fast reverse-owner lookup")
 	importTaxes := flag.Bool("import-taxes", false, "Run parcel tax importer for specified county")
 	importCounties := flag.Bool("import-counties", false, "Import all Georgia county boundaries from SAGIS API")
 	county := flag.String("county", "", "County name to import parcels for")
