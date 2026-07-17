@@ -2,7 +2,10 @@
 
 # Georgia Parcel Map
 
-**Interactive map visualization for Georgia's 4.77 million property parcels across all 159 counties**
+**Interactive map visualization for Georgia's ~5 million property parcels across all 159 counties**
+<p>
+A statewide Georgia parcel map with fast tile serving, search, parcel detail popup, owner reverse-search, and tax heatmap
+</p>
 
 [![Live Demo](https://img.shields.io/badge/demo-parcels.renderyourworld.com-blue)](https://parcels.renderyourworld.com)
 ![Go](https://img.shields.io/badge/go-%2300ADD8.svg?style=for-the-badge&logo=go&logoColor=white)
@@ -17,10 +20,7 @@
 <img src="docs/screenshots/state-view.jpg" alt="Georgia Parcel Map" width="600">
 
 
-<p>
-A statewide Georgia parcel map with fast tile serving, search, parcel detail popup, owner reverse-search, and tax heatmap.
-Built with Go, PostgreSQL/PostGIS, and MapLibre GL JS.
-</p>
+
 </div>
 
 ## Screenshots
@@ -49,6 +49,18 @@ Built with Go, PostgreSQL/PostGIS, and MapLibre GL JS.
     </tr>
   </table>
 </div>
+
+## Motivation
+
+Many parcel maps feel stuck in the past: they are slow, fragmented across county portals, and limited to basic parcel lookups with little context for how properties relate to each other. This project was built to make Georgia parcel data feel more like a modern, statewide geospatial platform than a collection of outdated government interfaces. By combining parcel geometry, tax information, owner relationships, and fast map interactions in one experience, it opens the door to better tools for real estate research, property tax analysis, and investigative workflows.
+
+## Quick Start
+
+The fastest way to see the project in action is to open the live demo:
+
+- Live demo: https://parcels.renderyourworld.com
+
+If you want to run it locally, this project is not a one-click static app. It expects a PostgreSQL/PostGIS database and imported county/parcel data, so the quickest path is usually to use the hosted demo first and then follow the database and CLI setup guidance in the project docs.
 
 ## How It Works
 
@@ -344,6 +356,12 @@ parcel_heatmap/
 │
 └── utils/               # Shared utilities (compression, logging, etc.)
 ```
+
+---
+
+## Contributing
+
+Contributions are welcome, but this is not a lightweight frontend-only project. To run a local copy, a contributor would need their own PostgreSQL/PostGIS database setup with the schema and structure described in the database documentation. Once that database is in place, they can run the existing importers to load county and parcel data, provided they also have a counties table populated with the appropriate ArcGIS REST API endpoints for the counties they want to import.
 
 ---
 
