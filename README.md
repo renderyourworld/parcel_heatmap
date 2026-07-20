@@ -17,7 +17,10 @@ A statewide Georgia parcel map with fast tile serving, search, parcel detail pop
 
 [How It Works](#how-it-works) • [Tech Stack](#tech-stack) • [Database Design](#database-design) • [Performance](#performance) • [CLI Usage](#cli-usage) • [Project Structure](#project-structure)
 
-<img src="docs/screenshots/state-view.jpg" alt="Georgia Parcel Map" width="600">
+<div style="display: flex; gap: 16px; flex-wrap: wrap; justify-content: center;">
+  <img src="docs/screenshots/overview.gif" alt="Georgia Parcel Map" width="600">
+  <img src="docs/screenshots/parcel_details.gif" alt="Georgia Parcel Map" width="600">
+</div>
 
 
 
