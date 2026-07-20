@@ -26,32 +26,6 @@ A statewide Georgia parcel map with fast tile serving, search, parcel detail pop
 
 </div>
 
-## Screenshots
-
-<div align="center">
-  <table>
-    <tr>
-      <td align="center">
-        <img src="docs/screenshots/county-parcels.jpg" alt="County & Parcel View" width="320"><br>
-        <em>County + parcel boundaries</em>
-      </td>
-      <td align="center">
-        <img src="docs/screenshots/parcel-details.jpg" alt="Property Details Popup" width="320"><br>
-        <em>Parcel details popup</em>
-      </td>
-    </tr>
-    <tr>
-      <td align="center">
-        <img src="docs/screenshots/owner-properties.jpg" alt="Owner Properties Results" width="320"><br>
-        <em>Owner reverse search results</em>
-      </td>
-      <td align="center">
-        <img src="docs/screenshots/tax-heatmap.jpg" alt="Tax Heatmap View" width="320"><br>
-        <em>Tax heatmap (grid + parcel)</em>
-      </td>
-    </tr>
-  </table>
-</div>
 
 ## Motivation
 
